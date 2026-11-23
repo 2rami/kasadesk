@@ -26,7 +26,7 @@ $obj = Join-Path $work "kasadesk.wixobj"
 & (Join-Path $wix "candle.exe") -nologo -arch x64 -ext WixFirewallExtension "-dVersion=$version" "-dBinDir=$binDir" -out $obj wix\kasadesk.wxs
 if ($LASTEXITCODE -ne 0) { throw "candle 실패" }
 $msi = Join-Path $root "dist\KasaDesk-$version-windows-x86_64.msi"
-& (Join-Path $wix "light.exe") -nologo -ext WixFirewallExtension -cultures:ko-KR -sice:ICE61 -out $msi $obj
+& (Join-Path $wix "light.exe") -nologo -spdb -ext WixFirewallExtension "-cultures:ko-kr;en-us" -out $msi $obj
 if ($LASTEXITCODE -ne 0) { throw "light 실패" }
 $hash = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
 "$hash  $(Split-Path $msi -Leaf)" | Set-Content -NoNewline -Encoding ascii "$msi.sha256"
