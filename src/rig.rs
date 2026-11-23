@@ -62,6 +62,8 @@ pub struct Rig {
     pub login_panel: bool,
     /// 띄우자마자 이 아이디·비밀번호로 로그인한다(`아이디:비밀번호`) — 로그인 판의 「로그인」과 같은 길.
     pub login: Option<(String, String)>,
+    /// 띄우자마자 「처음 보는 신원」 판을 연다(`공급자:표시 이름`) — 새 계정·기존 계정 판 모양을 뜨는 리그. 관문엔 안 닿는다.
+    pub choose: Option<(String, String)>,
 }
 
 fn ms(v: &str) -> Option<Duration> {
@@ -120,6 +122,7 @@ impl Rig {
             silent_audio: env("KASATERM_TEST_SCREEN_AUDIO_SILENT").is_some(),
             login_panel: env("KASATERM_VIEW_TEST_LOGIN_PANEL").is_some(),
             login: env("KASATERM_VIEW_TEST_LOGIN").and_then(|v| v.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))),
+            choose: env("KASATERM_VIEW_TEST_CHOOSE").and_then(|v| v.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))),
         }
     }
 

@@ -161,7 +161,22 @@ pub async fn password_login(client: &reqwest::Client, origin: &str, account: &st
 
 /// Google·GitHub 로그인 — 시스템 브라우저로 관문 승인 주소를 열고, 이 컴퓨터 루프백으로 돌아온 한 번 쓰는 코드를 PKCE 증명과
 /// 바꾼다. 남이 보낸 로그인 링크를 눌러도 코드는 이 프로세스의 증명이 없는 곳으로 가 쓸모가 없다.
-pub async fn oauth_login(client: &reqwest::Client, origin: &str, provider: &str, machine: &str, open: impl Fn(&str)) -> Result<Credential, String> {
+/// 처음 보는 Google·GitHub 신원 — 관문이 새 계정을 만들지 기존 계정에 이을지 묻는다(`kasaterm/docs/account-oauth.md`
+/// 「First sign-in」). 표(`ticket`)는 이 프로세스에만 있고 10분 산다.
+#[derive(Clone, Debug)]
+pub struct Ticket {
+    pub ticket: String,
+    pub provider: String,
+    pub display: String,
+    pub signup: bool,
+}
+
+pub enum Outcome {
+    Done(Credential),
+    Choose(Ticket),
+}
+
+pub async fn oauth_login(client: &reqwest::Client, origin: &str, provider: &str, machine: &str, open: impl Fn(&str)) -> Result<Outcome, String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("되돌아올 자리를 못 연다: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let redirect = format!("http://127.0.0.1:{port}/oauth/callback");
@@ -194,12 +209,55 @@ pub async fn oauth_login(client: &reqwest::Client, origin: &str, provider: &str,
     let status = res.status();
     let v: Value = res.json().await.unwrap_or(Value::Null);
     if v.get("status").and_then(Value::as_str) == Some("choose") {
-        return Err("이 계정은 아직 카사텀 계정과 이어지지 않았어요 — 카사텀 설정에서 연결하거나 아이디로 로그인해 주세요".into());
+        let field = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let ticket = field("ticket");
+        if ticket.is_empty() {
+            return Err("관문이 계정 고르기 표를 안 줬어요".into());
+        }
+        return Ok(Outcome::Choose(Ticket {
+            ticket,
+            provider: field("provider"),
+            display: field("display"),
+            signup: v.get("signup_enabled").and_then(Value::as_bool).unwrap_or(false),
+        }));
     }
     if !status.is_success() {
         return Err(error_of(&v, status));
     }
+    credential(origin, &v).map(Outcome::Done)
+}
+
+/// 처음 보는 신원으로 새 계정을 만든다(관문이 가입을 열어 둔 때만).
+pub async fn oauth_signup(client: &reqwest::Client, origin: &str, ticket: &str) -> Result<Credential, String> {
+    finish(client.post(format!("{origin}/relay/oauth/signup")).json(&json!({ "ticket": ticket })), origin).await
+}
+
+/// 처음 보는 신원을 이미 있는 아이디 계정에 잇는다 — 그 계정 비밀번호를 한 번 확인한다. 틀리면 표는 남아 다시 해 볼 수 있다.
+pub async fn oauth_claim(client: &reqwest::Client, origin: &str, ticket: &str, account: &str, password: &str) -> Result<Credential, String> {
+    let body = json!({ "ticket": ticket, "account": account, "password": password });
+    finish(client.post(format!("{origin}/relay/oauth/claim")).json(&body), origin).await
+}
+
+async fn finish(request: reqwest::RequestBuilder, origin: &str) -> Result<Credential, String> {
+    let res = request.send().await.map_err(|e| format!("관문에 못 닿아요: {e}"))?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(match v.get("error").and_then(Value::as_str) {
+            Some("bad_credentials") => "아이디나 비밀번호가 맞지 않아요".into(),
+            Some("signup_disabled") => "관문이 새 계정 만들기를 닫아 두었어요".into(),
+            Some("already_linked") => "이 신원은 이미 다른 계정에 이어져 있어요".into(),
+            _ => error_of(&v, status),
+        });
+    }
     credential(origin, &v)
+}
+
+/// 이 보기 앱의 카사넷 id 를 관문에 알린다 — 관문이 국내 중계 허용 목록에 넣어, 손으로 허용하지 않아도 국내 중계로 붙는다.
+/// 옛 관문(404)이면 조용히 넘어간다.
+pub async fn report_ids(client: &reqwest::Client, c: &Credential, view_id: &str) -> bool {
+    let res = client.post(format!("{}/relay/kasanet/ids", c.origin)).bearer_auth(&c.token).json(&json!({ "ids": [view_id] })).send().await;
+    res.is_ok_and(|r| r.status().is_success() || r.status() == reqwest::StatusCode::NOT_FOUND)
 }
 
 /// 되돌아온 요청 중 우리 `state` 를 실은 것만 받는다 — 다른 방문은 404 로 돌려보내고 기다림을 이어 간다.

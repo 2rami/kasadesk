@@ -1,12 +1,13 @@
 //! 고르기 화면의 계정 — 오른쪽 위 「로그인」(로그인했으면 계정 이름·「로그아웃」) 단추와, 누르면 뜨는 로그인 판. 판은
-//! Google·GitHub(관문이 켠 것만, 시스템 브라우저로)와 아이디·비밀번호 칸이다. 관문 일은 `account.rs`, 여기는 그리기·판정·입력.
+//! Google·GitHub(관문이 켠 것만, 시스템 브라우저로)와 아이디·비밀번호 칸이다. 처음 보는 Google·GitHub 신원이면 판이 「새 계정으로
+//! 시작」(관문이 가입을 열었을 때)과 「기존 계정에 잇기」(아이디·비밀번호 한 번)를 묻는다. 관문 일은 `account.rs`, 여기는 그리기·판정·입력.
 
 use kasa_castview::{contains, Rect};
 use kasa_gridview::GridRenderer;
 use winit::event::{ElementState, KeyEvent};
 use winit::keyboard::{Key, NamedKey};
 
-use crate::account::Credential;
+use crate::account::{Credential, Ticket};
 use crate::text::Ui;
 
 const TEXT: [u8; 4] = [236, 240, 246, 255];
@@ -27,6 +28,7 @@ enum Hit {
     Provider(String),
     Field(usize),
     Submit,
+    Signup,
     Close,
 }
 
@@ -39,6 +41,10 @@ pub enum Action {
     Logout,
     Provider(String),
     Password(String, String),
+    /// 처음 보는 신원으로 새 계정을 만든다.
+    Signup,
+    /// 처음 보는 신원을 이 아이디 계정에 잇는다.
+    Claim(String, String),
 }
 
 #[derive(Default)]
@@ -51,6 +57,8 @@ pub struct Login {
     pub busy: Option<&'static str>,
     pub error: Option<String>,
     pub providers: Vec<String>,
+    /// 처음 보는 신원 — 있으면 판이 새 계정·기존 계정을 묻는다.
+    pub choose: Option<Ticket>,
     hits: Vec<(Rect, Hit)>,
 }
 
@@ -85,18 +93,40 @@ impl Login {
         self.hits.retain(|(_, hit)| *hit == Hit::Chip);
         g.rect(0.0, 0.0, w, h, [0, 0, 0, 150]);
         let inner = CARD_W - PAD * 2.0;
-        let rows = self.providers.len() as f32;
+        let choose = self.choose.clone();
+        let signup = choose.as_ref().is_some_and(|t| t.signup);
+        let rows = if choose.is_some() { f32::from(u8::from(signup)) } else { self.providers.len() as f32 };
         let card_h = 84.0 + rows * (ROW + 10.0) + if rows > 0.0 { 26.0 } else { 0.0 } + (ROW + 10.0) * 3.0 + if self.error.is_some() { 30.0 } else { 14.0 };
         let (cx, cy) = (((w - CARD_W) / 2.0).max(8.0), ((h - card_h) / 2.0).max(8.0));
         g.round_rect_fill(cx, cy, CARD_W, card_h, 12.0, CARD);
         g.round_rect_stroke(cx, cy, CARD_W, card_h, 12.0, 1.0, EDGE);
-        ui.draw(g, cx + PAD, cy + 24.0, "카사텀 계정으로 로그인", 18.0, TEXT, true);
-        ui.draw(g, cx + PAD, cy + 52.0, "카사텀이 없는 컴퓨터에서도 내 기기를 고르고 볼 수 있어요", 11.0, MUTE, false);
+        let (title, lead) = match &choose {
+            Some(t) => (
+                format!("{} 로 처음 왔어요", provider_name(&t.provider)),
+                if t.display.is_empty() { "처음 보는 계정이에요".to_string() } else { format!("{} · 처음 보는 계정이에요", t.display) },
+            ),
+            None => ("카사텀 계정으로 로그인".to_string(), "카사텀이 없는 컴퓨터에서도 내 기기를 고르고 볼 수 있어요".to_string()),
+        };
+        ui.draw(g, cx + PAD, cy + 24.0, &title, 18.0, TEXT, true);
+        ui.draw(g, cx + PAD, cy + 52.0, &lead, 11.0, MUTE, false);
         let close = (cx + CARD_W - 40.0, cy + 16.0, 28.0, 28.0);
         ui.draw(g, close.0 + 9.0, close.1 + 5.0, "×", 16.0, MUTE, false);
         self.hits.push((close, Hit::Close));
         let mut y = cy + 84.0;
-        for p in self.providers.clone() {
+        if choose.is_some() {
+            if signup {
+                let r = (cx + PAD, y, inner, ROW);
+                g.round_rect_fill(r.0, r.1, r.2, r.3, 8.0, ACCENT);
+                let text = "새 계정으로 시작";
+                let tw = ui.measure(g, text, 13.0, false);
+                ui.draw(g, r.0 + (r.2 - tw) / 2.0, r.1 + 10.0, text, 13.0, TEXT, false);
+                self.hits.push((r, Hit::Signup));
+                y += ROW + 10.0;
+                ui.draw(g, cx + PAD, y + 2.0, "또는 쓰던 아이디 계정에 잇기", 11.0, MUTE, false);
+                y += 26.0;
+            }
+        }
+        for p in if choose.is_some() { Vec::new() } else { self.providers.clone() } {
             let r = (cx + PAD, y, inner, ROW);
             g.round_rect_fill(r.0, r.1, r.2, r.3, 8.0, CHIP);
             let text = format!("{} 로 계속", provider_name(&p));
@@ -105,7 +135,7 @@ impl Login {
             self.hits.push((r, Hit::Provider(p)));
             y += ROW + 10.0;
         }
-        if rows > 0.0 {
+        if rows > 0.0 && choose.is_none() {
             ui.draw(g, cx + PAD, y + 2.0, "또는 아이디로", 11.0, MUTE, false);
             y += 26.0;
         }
@@ -127,8 +157,8 @@ impl Login {
             y += ROW + 10.0;
         }
         let r = (cx + PAD, y, inner, ROW);
-        g.round_rect_fill(r.0, r.1, r.2, r.3, 8.0, if self.busy.is_some() { CHIP } else { ACCENT });
-        let label = self.busy.unwrap_or("로그인");
+        g.round_rect_fill(r.0, r.1, r.2, r.3, 8.0, if self.busy.is_some() || choose.is_some() { CHIP } else { ACCENT });
+        let label = self.busy.unwrap_or(if choose.is_some() { "이 계정에 잇기" } else { "로그인" });
         let tw = ui.measure(g, label, 13.0, false);
         ui.draw(g, r.0 + (r.2 - tw) / 2.0, r.1 + 10.0, label, 13.0, TEXT, false);
         self.hits.push((r, Hit::Submit));
@@ -157,6 +187,7 @@ impl Login {
                 Action::Redraw
             }
             Some(Hit::Provider(p)) => self.start(Action::Provider(p)),
+            Some(Hit::Signup) => self.start(Action::Signup),
             Some(Hit::Submit) => self.submit(),
             None => Action::None,
         }
@@ -211,13 +242,28 @@ impl Login {
             self.field = if self.id.trim().is_empty() { 0 } else { 1 };
             return Action::Redraw;
         }
-        let action = Action::Password(self.id.trim().to_string(), std::mem::take(&mut self.pw));
+        let (id, pw) = (self.id.trim().to_string(), std::mem::take(&mut self.pw));
+        let action = if self.choose.is_some() { Action::Claim(id, pw) } else { Action::Password(id, pw) };
         self.start(action)
+    }
+
+    /// 처음 보는 신원 — 판을 열어 새 계정·기존 계정을 묻는다.
+    pub fn ask(&mut self, ticket: Ticket) {
+        self.busy = None;
+        self.error = None;
+        self.open = true;
+        self.field = 0;
+        self.choose = Some(ticket);
     }
 
     fn start(&mut self, action: Action) -> Action {
         self.error = None;
-        self.busy = Some(if matches!(action, Action::Provider(_)) { "브라우저에서 로그인을 마쳐 주세요" } else { "로그인하는 중" });
+        self.busy = Some(match action {
+            Action::Provider(_) => "브라우저에서 로그인을 마쳐 주세요",
+            Action::Signup => "계정을 만드는 중",
+            Action::Claim(..) => "계정에 잇는 중",
+            _ => "로그인하는 중",
+        });
         action
     }
 
@@ -233,5 +279,6 @@ impl Login {
         self.open = false;
         self.pw.clear();
         self.error = None;
+        self.choose = None;
     }
 }

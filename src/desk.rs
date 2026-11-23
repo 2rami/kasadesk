@@ -40,6 +40,8 @@ pub enum Ev {
     Roster { machines: Vec<Machine>, app_alive: bool },
     /// 로그인이 끝났다(성공이면 자격).
     Login(Result<Credential, String>),
+    /// 처음 보는 Google·GitHub 신원 — 새 계정이냐 기존 계정에 잇기냐를 물어야 한다.
+    Choose(account::Ticket),
     /// 관문이 켠 로그인 방법.
     Providers(Vec<String>),
     /// 관문이 자격을 거절했다(폐기·다른 곳에서 로그아웃) — 명부 일꾼이 이미 지웠다.
@@ -183,6 +185,22 @@ impl Desk {
                 let (proxy, machine) = (self.proxy.clone(), account::install_id(&self.state));
                 self.net.handle.spawn(async move {
                     let r = account::oauth_login(&account::client(), &account::gateway(), &provider, &machine, account::open_browser).await;
+                    let _ = proxy.send_event(match r {
+                        Ok(account::Outcome::Done(c)) => Ev::Login(Ok(c)),
+                        Ok(account::Outcome::Choose(t)) => Ev::Choose(t),
+                        Err(e) => Ev::Login(Err(e)),
+                    });
+                });
+            }
+            Action::Signup | Action::Claim(..) => {
+                let Some(ticket) = self.login.choose.as_ref().map(|t| t.ticket.clone()) else { return };
+                let proxy = self.proxy.clone();
+                self.net.handle.spawn(async move {
+                    let (client, origin) = (account::client(), account::gateway());
+                    let r = match action {
+                        Action::Claim(id, pw) => account::oauth_claim(&client, &origin, &ticket, &id, &pw).await,
+                        _ => account::oauth_signup(&client, &origin, &ticket).await,
+                    };
                     let _ = proxy.send_event(Ev::Login(r));
                 });
             }
@@ -550,6 +568,9 @@ impl ApplicationHandler<Ev> for Desk {
         for open in std::mem::take(&mut self.pending) {
             self.open(event_loop, open);
         }
+        if let Some((provider, display)) = self.test.choose.take() {
+            self.login.ask(account::Ticket { ticket: String::new(), provider, display, signup: true });
+        }
         if let Some((id, pw)) = self.test.login.take() {
             self.login_action(Action::Password(id, pw));
         }
@@ -571,6 +592,10 @@ impl ApplicationHandler<Ev> for Desk {
                     Ok(())
                 });
                 self.login.done(result);
+                self.redraw_pickers();
+            }
+            Ev::Choose(ticket) => {
+                self.login.ask(ticket);
                 self.redraw_pickers();
             }
             Ev::Providers(list) => {

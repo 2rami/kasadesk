@@ -118,6 +118,7 @@ fn main() -> anyhow::Result<()> {
             let mut gateway_at: Option<Instant> = None;
             // 관문 기기 id → (마지막 시도, 등록됐나).
             let mut registered: HashMap<String, (Instant, bool)> = HashMap::new();
+            let mut reported: Option<(Instant, bool)> = None;
             loop {
                 let mut snap = roster::merge(roster::fetch(&app), &known);
                 if snap.app_alive && snap.machines != known {
@@ -139,9 +140,13 @@ fn main() -> anyhow::Result<()> {
                                     session.set(None);
                                     gateway.clear();
                                     registered.clear();
+                                    reported = None;
                                     let _ = proxy.send_event(desk::Ev::Revoked);
                                 }
                             }
+                        }
+                        if reported.is_none_or(|(at, ok)| at.elapsed() >= if ok { REGISTER_EVERY } else { REGISTER_RETRY }) {
+                            reported = Some((Instant::now(), handle.block_on(account::report_ids(&client, &cred, &me))));
                         }
                         roster::with_account(&mut snap, gateway.clone());
                         for gw in snap.machines.iter().filter_map(|m| m.account.clone()) {
@@ -156,6 +161,7 @@ fn main() -> anyhow::Result<()> {
                         gateway.clear();
                         gateway_at = None;
                         registered.clear();
+                        reported = None;
                     }
                     None => {}
                 }
