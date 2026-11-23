@@ -334,7 +334,7 @@ pub async fn machines(client: &reqwest::Client, c: &Credential, me: &str) -> Res
             continue;
         }
         let kind = DeviceKind::classify(name, &version);
-        out.push(Machine { label: name.to_string(), kind, kasanet: kasanet.clone(), fresh: true, account: Some(id.to_string()) });
+        out.push(Machine { label: name.to_string(), kind, model_id: version["model"].as_str().map(str::to_owned), kasanet: kasanet.clone(), fresh: true, account: Some(id.to_string()) });
     }
     Ok(out)
 }

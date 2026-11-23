@@ -20,6 +20,30 @@
 
 카사텀의 「화면 보기」는 깔린 KasaDesk 를 그 기기로 띄우고, 없으면 카사텀 안 화면 탭으로 열어요.
 
+## 제조사 기기 모델
+
+Apple과 Dell의 제품 페이지에서 제공하는 3D 모델을 이 컴퓨터의 모델 폴더에 준비할 수 있어요.
+Python 3과 Blender 4.4 이상이 설치된 환경에서 저장소 루트의 다음 명령을 실행하고 KasaDesk를 열어요.
+
+```sh
+python3 scripts/prepare-models.py
+```
+
+스크립트는 [제품 카탈로그](scripts/official-models.json)의 원본 파일을 받아 SHA-256을 확인하고 메시와 텍스처를 변환해요.
+Blender의 실행 경로는 `--blender`로 지정할 수 있어요. 모델 폴더는 맥에서 `~/Library/Application Support/KasaDesk/Models`,
+Windows에서 `%LOCALAPPDATA%/KasaDesk/Models`예요. `KASADESK_MODEL_DIR`을 지정하면 앱과 준비 스크립트가 그 폴더를 써요.
+
+앱은 기기가 보고한 모델 식별자로 제품을 찾아요. 조립 PC처럼 식별자만으로 제품을 알 수 없으면 모델 폴더의
+`bindings.json`에 카사넷 기기 ID 또는 명부 이름으로 연결할 수 있어요. 예를 들어 아래 설정은 한 PC에 Dell 모니터와 HYTE 케이스를 연결해요.
+모형이 준비되기 전에도 이름표로 기기에 들어갈 수 있어요.
+
+```json
+{
+  "작업용 PC": { "display": "aw3821dw", "case": "hyte-y60" },
+  "작업용 맥북": { "computer": "m4" }
+}
+```
+
 ## 업데이트
 
 카사텀과 같은 길이에요. 피드는 이 저장소의 Pages 에서 나가고, 판마다 이 앱 전용 EdDSA 키로 서명해요.

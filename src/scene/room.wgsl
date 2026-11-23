@@ -14,6 +14,8 @@ struct Scene {
 @group(0) @binding(1) var panorama: texture_2d<f32>;
 @group(0) @binding(2) var linear_sampler: sampler;
 
+@group(0) @binding(3) var products: texture_2d_array<f32>;
+
 @group(1) @binding(0) var shadow_map: texture_depth_2d;
 @group(1) @binding(1) var compare_depth: sampler_comparison;
 
@@ -49,6 +51,7 @@ struct Vertex {
     @location(3) position: vec3<f32>,
     @location(4) lift: f32,
     @location(5) glow: f32,
+    @location(6) uv: vec2<f32>,
 };
 
 struct Surface {
@@ -59,6 +62,7 @@ struct Surface {
     @location(3) @interpolate(flat) material: vec4<f32>,
     @location(4) @interpolate(flat) lift: f32,
     @location(5) @interpolate(flat) glow: f32,
+    @location(6) uv: vec2<f32>,
 };
 
 @vertex
@@ -72,7 +76,7 @@ fn project(v: Vertex) -> Surface {
     // 빛 웅덩이는 들리지 않고 바닥(책상)에 남는다.
     let rise = select(v.lift * 0.45, 0.0, v.material.w == 6.0);
     let world = v.position + v.point + vec3<f32>(0.0, rise, 0.0);
-    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.point, v.material, v.lift, v.glow);
+    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.point, v.material, v.lift, v.glow, v.uv);
 }
 
 fn lin(c: vec3<f32>) -> vec3<f32> {
@@ -121,16 +125,10 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
     let mode = s.material.w;
     let base = lin(s.material.rgb);
     let n = normalize(s.normal + vec3<f32>(0.0, 1e-5, 0.0));
-    if mode == 1.0 {
-        return out(base * (0.40 + 1.45 * s.glow), 1.0);
-    }
-    if mode == 4.0 {
-        let uv = vec2<f32>(0.54 + s.world.x * 0.014 - s.local.x * 0.055, 0.65 - s.local.y * 0.055);
-        let v = normalize(scene.camera.xyz - s.world);
-        let fresnel = pow(1.0 - abs(dot(n, v)), 2.0);
-        let reflection = orbit(uv);
-        let glass = vec3<f32>(0.028, 0.050, 0.075) + reflection * vec3<f32>(0.18, 0.23, 0.30) * (0.8 + fresnel);
-        return vec4<f32>(mix(glass, reflection * 0.80 + vec3<f32>(0.03, 0.09, 0.14), s.glow), 1.0);
+    if mode >= 32.0 {
+        let tex = textureSampleLevel(products, linear_sampler, s.uv, i32(mode - 32.0) % 32, 0.0).rgb;
+        if mode >= 64.0 { return vec4<f32>(s.material.rgb * tex * (0.65 + 0.35 * s.glow), 1.0); }
+        return out(light(s, n, base * lin(tex)), 1.0);
     }
     if mode == 6.0 {
         let r = length(s.normal.xz);
@@ -143,27 +141,10 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
     if mode == 12.0 {
         return vec4<f32>(mix(accent(), vec3<f32>(1.0), 0.23), 1.0);
     }
-    if mode == 13.0 {
-        let fan_y = select(1.03, 2.38, s.local.y > 1.7);
-        let disk = vec2<f32>(s.local.x - 0.92, s.local.y - fan_y);
-        let r = length(disk);
-        let angle = atan2(disk.y, disk.x);
-        let ring = 1.0 - smoothstep(0.010, 0.039, abs(r - 0.515));
-        let vane = smoothstep(-0.3, 0.3, sin(angle * 9.0 + r * 4.0)) * smoothstep(0.12, 0.19, r) * (1.0 - smoothstep(0.46, 0.50, r));
-        return out(vec3<f32>(0.015, 0.027, 0.039) * (1.0 + 1.4 * vane) + accent() * ring * (0.18 + s.glow), 1.0);
-    }
-    if mode == 14.0 {
-        let sheen = orbit(vec2<f32>(0.48 + s.local.x * 0.10, 0.81 - s.local.y * 0.07));
-        return vec4<f32>(sheen * 0.65 + vec3<f32>(0.06, 0.11, 0.15), 0.17);
-    }
     // 브러시 결은 화면 한 픽셀보다 좁아지면 평균값으로 수렴시킨다.
     let grain_uv = (s.world.x + s.world.z + s.world.y * 0.37) * 138.0;
     let fine = sin(grain_uv) * (1.0 - smoothstep(0.8, 3.1, fwidth(grain_uv)));
     var tone = base * (1.0 + 0.035 * fine);
-    if mode == 15.0 {
-        let grid = fract(s.local.xz * 34.0) - 0.5;
-        tone *= 0.32 + 0.68 * smoothstep(0.15, 0.36, length(grid));
-    }
     if mode == 2.0 {
         let seam = abs(fract(s.world.xz * vec2<f32>(0.2, 0.34)) - 0.5);
         let joint = smoothstep(0.494, 0.499, max(seam.x, seam.y));

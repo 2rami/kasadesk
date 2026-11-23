@@ -1,5 +1,6 @@
 //! 궤도 관측실의 조작대에서 기기를 선택하면 카메라가 해당 화면으로 이동한다.
 
+mod catalog;
 mod gpu;
 mod mesh;
 
@@ -36,7 +37,7 @@ const FOV_Y: f32 = 0.76;
 const HOME_YAW: f32 = 0.13;
 const HOME_PITCH: f32 = 0.22;
 const LAPTOP_SLOT: f32 = 3.6;
-const DESKTOP_SLOT: f32 = 8.9;
+const DESKTOP_SLOT: f32 = 11.4;
 
 type Point = (f32, f32);
 type Rect = (f32, f32, f32, f32);
@@ -148,9 +149,28 @@ struct Device {
 struct Part {
     device: usize,
     model: Model,
+    asset: Option<usize>,
+    bounds: Option<(Vec3, Vec3)>,
     position: Vec3,
     lifts: bool,
     main: bool,
+}
+
+impl Part {
+    fn new(device: usize, machine: &Machine, model: Model, position: Vec3) -> Self {
+        let library = catalog::library();
+        let asset = library.resolve(machine, model);
+        let bounds = asset.and_then(|i| library.assets[i].geometry.as_ref()).map(|g| (g.center, g.half));
+        Self { device, model, asset, bounds, position, lifts: model != Model::Tower, main: model != Model::Tower }
+    }
+
+    fn asset(&self) -> Option<&'static catalog::Asset> {
+        self.asset.map(|i| &catalog::library().assets[i])
+    }
+
+    fn top(&self) -> Vec3 {
+        self.bounds.map_or(Vec3::Y * 0.45, |(center, half)| center + Vec3::Y * half.y)
+    }
 }
 
 pub struct Layout {
@@ -165,32 +185,34 @@ impl Layout {
     fn new(window: Point, machines: &[Machine], page: usize) -> Self {
         let first = page * PAGE;
         let page_machines = &machines[first.min(machines.len())..machines.len().min(first + PAGE)];
+        let catalog = catalog::library();
+        let kinds: Vec<_> = page_machines.iter().map(|m| catalog.kind(m)).collect();
         let slot = |kind| if kind == DeviceKind::Desktop { DESKTOP_SLOT } else { LAPTOP_SLOT };
-        let on_desk: Vec<usize> = (0..page_machines.len()).filter(|&i| !page_machines[i].kind.on_rack()).collect();
-        let minis: Vec<usize> = (0..page_machines.len()).filter(|&i| page_machines[i].kind.on_rack()).collect();
-        let desk_len = (1.3 + on_desk.iter().map(|&i| slot(page_machines[i].kind)).sum::<f32>() + 1.3).max(5.6);
+        let on_desk: Vec<usize> = (0..page_machines.len()).filter(|&i| !kinds[i].on_rack()).collect();
+        let minis: Vec<usize> = (0..page_machines.len()).filter(|&i| kinds[i].on_rack()).collect();
+        let desk_len = (1.3 + on_desk.iter().map(|&i| slot(kinds[i])).sum::<f32>() + 1.3).max(5.6);
         let plan = Plan::new(desk_len, minis.len());
         let mut parts = Vec::new();
         let mut x = plan.desk_start();
         for &i in &on_desk {
-            let width = slot(page_machines[i].kind);
+            let width = slot(kinds[i]);
             let cx = x + width / 2.0;
             x += width;
-            if page_machines[i].kind == DeviceKind::Desktop {
-                parts.push(Part { device: i, model: Model::Monitor, position: vec3(cx - 1.70, mesh::DESK_Y, -0.3), lifts: true, main: true });
-                parts.push(Part { device: i, model: Model::Tower, position: vec3(cx + 2.66, mesh::DESK_Y, -0.35), lifts: false, main: false });
+            if kinds[i] == DeviceKind::Desktop {
+                parts.push(Part::new(i, &page_machines[i], Model::Monitor, vec3(cx - 1.90, mesh::DESK_Y, -0.3)));
+                parts.push(Part::new(i, &page_machines[i], Model::Tower, vec3(cx + 3.92, mesh::DESK_Y, -0.35)));
             } else {
-                let model = match page_machines[i].kind {
+                let model = match kinds[i] {
                     DeviceKind::Air => Model::Air,
                     DeviceKind::Pro => Model::Pro,
                     _ => Model::Laptop,
                 };
-                parts.push(Part { device: i, model, position: vec3(cx, mesh::DESK_Y, 0.25), lifts: true, main: true });
+                parts.push(Part::new(i, &page_machines[i], model, vec3(cx, mesh::DESK_Y, 0.25)));
             }
         }
         for (k, &i) in minis.iter().enumerate() {
-            let model = if page_machines[i].kind == DeviceKind::MiniM4 { Model::MiniM4 } else { Model::Mini };
-            parts.push(Part { device: i, model, position: plan.shelf_slot(k), lifts: true, main: true });
+            let model = if kinds[i] == DeviceKind::MiniM4 { Model::MiniM4 } else { Model::Mini };
+            parts.push(Part::new(i, &page_machines[i], model, plan.shelf_slot(k)));
         }
         let devices = (0..page_machines.len()).map(|i| Device { index: first + i, lift: 0.0, glow: 0.0 }).collect();
         Self { window, home: home_view(&plan, window), plan, devices, parts }
@@ -213,7 +235,7 @@ impl Layout {
         let ray = frame.ray(pointer)?;
         self.parts.iter().filter_map(|part| {
             let device = &self.devices[part.device];
-            let (center, half) = part.model.hull();
+            let (center, half) = part.bounds?;
             let center = self.part_center(part) + center;
             // 들리는 동안에도 처음 자리를 누른 채 있으면 놓치지 않는다.
             let slack = if hovered == Some(device.index) && part.lifts { Vec3::Y * device.lift * LIFT_HEIGHT } else { Vec3::ZERO };
@@ -225,14 +247,20 @@ impl Layout {
     fn anchors(&self, frame: &Frame) -> Vec<(usize, Vec2)> {
         self.devices.iter().enumerate().filter_map(|(d, device)| {
             let part = self.main_part(d)?;
-            Some((device.index, frame.project(self.part_center(part) + part.model.top() + Vec3::Y * 0.35)))
+            Some((device.index, frame.project(self.part_center(part) + part.top() + Vec3::Y * 0.35)))
         }).collect()
     }
 
     /// 그 기기 화면 바로 앞.
     fn dive_view(&self, index: usize) -> Option<View> {
         let part = self.main_part(self.device_of(index)?)?;
-        let (face, size, yaw, pitch) = part.model.face();
+        let (mut face, mut size, yaw, pitch) = part.model.face();
+        if let Some((center, half)) = part.bounds {
+            let (nominal_center, nominal_half) = part.model.hull();
+            let ratio = half / nominal_half;
+            face = center + (face - nominal_center) * ratio;
+            size *= vec2(ratio.x, ratio.y);
+        }
         let aspect = self.window.0 / self.window.1.max(1.0);
         let half = (size.y * 0.5 / 0.62).max(size.x * 0.5 / 0.84 / aspect);
         Some(View { target: self.part_center(part) + face, yaw, pitch, half })
@@ -545,12 +573,24 @@ impl Room {
         let mut tags = Vec::new();
         if calm > 0.0 {
             // 고른 기기 먼저 제자리에, 나머지는 겹치면 위로 비켜 쌓는다 — 이름을 접지 않는다.
-            let mut anchors = layout.anchors(&home);
+            let mut anchors: Vec<_> = layout.anchors(&home).into_iter()
+                .map(|(i, p)| (i, p, machines[i].label.as_str())).collect();
+            for part in layout.parts.iter().filter(|p| !p.main) {
+                if let Some(asset) = part.asset() {
+                    let where_ = if asset.geometry.is_none() { Vec3::Y * 0.5 } else { part.top() };
+                    let at = home.project(layout.part_center(part) + where_);
+                    anchors.push((layout.devices[part.device].index, at, &asset.name));
+                }
+            }
             anchors.sort_by(|a, b| (Some(b.0) == self.selected).cmp(&(Some(a.0) == self.selected)).then(b.1.y.total_cmp(&a.1.y)));
-            let mut placed: Vec<(Rect, usize, Vec2, bool)> = Vec::new();
-            for &(index, at) in &anchors {
+            let mut placed: Vec<(Rect, usize, Vec2, bool, Tag)> = Vec::new();
+            for &(index, at, name) in &anchors {
                 let focus = self.selected == Some(index);
-                let tag = Tag { name: &machines[index].label, path: &paths[index], live: live.get(index).copied().unwrap_or(false) };
+                let product = if name == machines[index].label {
+                    catalog::library().description(&machines[index]).or_else(||
+                        layout.device_of(index).and_then(|i| layout.main_part(i)).and_then(Part::asset).map(|a| a.name.as_str()))
+                } else { None };
+                let tag = Tag { name, product, path: &paths[index], live: live.get(index).copied().unwrap_or(false) };
                 let (w, h) = tag.size(g, ui, focus);
                 let left = (at.x - w / 2.0).clamp(4.0, (width - w - 4.0).max(4.0));
                 let mut rect = (left, at.y - h - 8.0, w, h);
@@ -558,18 +598,17 @@ impl Room {
                     let Some(top) = placed.iter().filter(|(r, ..)| overlaps(*r, rect)).map(|(r, ..)| r.1).min_by(f32::total_cmp) else { break };
                     rect.1 = top - h - 4.0;
                 }
-                placed.push((rect, index, at, focus));
+                placed.push((rect, index, at, focus, tag));
             }
             placed.sort_by_key(|p| p.3);
             // 줄을 먼저 다 긋는다 — 위로 비켜 선 이름표의 줄이 아래 이름표 글자를 지우지 않게.
-            for &((_, y, _, h), _, at, _) in &placed {
+            for &((_, y, _, h), _, at, _, _) in &placed {
                 let stem = at.y - (y + h);
                 if stem > 0.0 {
                     g.rect(at.x - 1.0, y + h, 2.0, stem, fade(TAG, calm * 0.8));
                 }
             }
-            for (rect, index, _, focus) in placed {
-                let tag = Tag { name: &machines[index].label, path: &paths[index], live: live.get(index).copied().unwrap_or(false) };
+            for (rect, index, _, focus, tag) in placed {
                 tag.draw(g, ui, rect, focus, calm);
                 tags.push((rect, index));
             }
@@ -633,6 +672,7 @@ impl Room {
 
 struct Tag<'a> {
     name: &'a str,
+    product: Option<&'a str>,
     path: &'a str,
     live: bool,
 }
@@ -648,7 +688,10 @@ impl Tag<'_> {
 
     fn lines(&self, g: &mut GridRenderer, ui: &mut Ui, focus: bool) -> (String, Option<String>) {
         let name = fit(g, ui, self.name, Self::text_size(focus), focus, Self::NAME_MAX).into_owned();
-        let path = focus.then(|| fit(g, ui, self.path, 11.5, false, Self::PATH_MAX).into_owned());
+        let path = focus.then(|| {
+            let text = self.product.map(|product| format!("{product} · {}", self.path));
+            fit(g, ui, text.as_deref().unwrap_or(self.path), 11.5, false, Self::PATH_MAX).into_owned()
+        });
         (name, path)
     }
 
@@ -725,6 +768,7 @@ mod tests {
     fn machines(kinds: &[DeviceKind]) -> Vec<Machine> {
         kinds.iter().enumerate().map(|(i, &kind)| Machine {
             label: format!("fixture-{i}"),
+            model_id: None,
             kind,
             kasanet: serde_json::Value::Null,
             fresh: false,
@@ -745,9 +789,13 @@ mod tests {
         }
     }
 
+    fn attach_fixture_geometry(layout: &mut Layout) {
+        for part in &mut layout.parts { part.bounds = Some(part.model.hull()); }
+    }
+
     fn center(layout: &Layout, frame: &Frame, index: usize) -> Point {
         let part = layout.main_part(layout.device_of(index).unwrap()).unwrap();
-        let p = frame.project(layout.part_center(part) + part.model.hull().0);
+        let p = frame.project(layout.part_center(part) + part.bounds.unwrap_or_else(|| part.model.hull()).0);
         (p.x, p.y)
     }
 
@@ -764,7 +812,7 @@ mod tests {
             }
         }
         for part in &layout.parts {
-            let (center, half) = part.model.hull();
+            let (center, half) = part.bounds.unwrap_or_else(|| part.model.hull());
             for side in [-1.0, 1.0] {
                 let p = frame.project(part.position + center + half * side);
                 assert!(p.x >= PAD && p.x <= 1280.0 - PAD, "{p}");
@@ -778,7 +826,8 @@ mod tests {
         for kind in [DeviceKind::Mini, DeviceKind::MiniM4, DeviceKind::Desktop, DeviceKind::Air, DeviceKind::Pro] {
             let devices = machines(&[kind; PAGE]);
             for window in [(600.0, 400.0), (1920.0, 700.0), (600.0, 900.0)] {
-                let layout = Layout::new(window, &devices, 0);
+                let mut layout = Layout::new(window, &devices, 0);
+                attach_fixture_geometry(&mut layout);
                 for look in [Vec2::ONE, -Vec2::ONE] {
                     let frame = layout.home.with_look(look).frame(window);
                     for i in 0..PAGE {
@@ -791,10 +840,21 @@ mod tests {
     }
 
     #[test]
+    fn a_name_only_part_has_no_invisible_pick_volume() {
+        let machines = machines(&[DeviceKind::Laptop]);
+        let mut layout = Layout::new((800.0, 600.0), &machines, 0);
+        layout.parts[0].bounds = None;
+        let frame = layout.home.frame(layout.window);
+        assert_eq!(layout.hit(&frame, center(&layout, &frame, 0), None), None);
+        assert_eq!(layout.anchors(&frame).len(), 1);
+    }
+
+    #[test]
     fn every_device_can_be_picked_at_rest_and_while_rising() {
         let devices = mixed(9);
         let mut room = Room::default();
         room.reflow((1280.0, 800.0), &devices);
+        attach_fixture_geometry(room.layout.as_mut().unwrap());
         let frame = room.home_frame().unwrap();
         for i in 0..devices.len() {
             let p = center(room.layout.as_ref().unwrap(), &frame, i);

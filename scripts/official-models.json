@@ -1,0 +1,67 @@
+{
+  "models": {
+    "m3": {
+      "name": "MacBook Pro 14″ (2023)",
+      "source": "https://www.apple.com/105/media/us/macbook-pro/2023/232a2dbf-5898-4fd1-a350-6a7c5c2e31c9/ar/macbook_pro_m3_pro_14_space_black.usdz",
+      "kind": "pro",
+      "sha256": "e49f52a222b93ce950ac3ab3b7b8492889f8aa67858ea64f5e6fb553c44a779f"
+    },
+    "m4": {
+      "name": "MacBook Pro 14″ (2024)",
+      "source": "https://www.apple.com/105/media/us/macbook-pro/2024/00a46e4c-adb6-4301-aa38-917d219bff07/ar/macbook-pro-14in-silver.usdz",
+      "kind": "pro",
+      "sha256": "c53a294c0269427e46342a8b92238badc42603e9f66dd34b8e201abfaef9bda0"
+    },
+    "air": {
+      "name": "MacBook Air 13″ (2025)",
+      "source": "https://www.apple.com/105/media/us/macbook-air/2025/0833fe28-c438-4dc4-8edc-e39ef30df5f9/ar/macbook-air-13in-silver.usdz",
+      "kind": "air",
+      "sha256": "5acfda9b9628bee1b500e6b6225baf4768ebc27e91dc3eaf839f568d7e1597e1"
+    },
+    "mini-m4": {
+      "name": "Mac mini M4",
+      "source": "https://www.apple.com/105/media/us/mac-mini/2024/58e5921e-f447-487a-a789-3452c23b8400/ar/mac-mini-silver.usdz",
+      "kind": "mini-m4",
+      "sha256": "83c6bc7efd467ad658130d575b59a8fad2e1c833dbf326890475cb10630da047"
+    },
+    "aw3821dw": {
+      "name": "Alienware AW3821DW",
+      "source": "https://content.hmxmedia.com/dell-aw3821dw-monitor-AR/gltf/dell-aw3821dw-monitor-AR.glb",
+      "kind": "display",
+      "sha256": "8d6a0903c6f3503574b08e93241003efa73021bce8df4aa486262f2fa16ac5bd"
+    },
+    "hyte-y60": {
+      "name": "HYTE Y60 Snow White",
+      "kind": "case"
+    }
+  },
+  "defaults": {
+    "mini-m4": "mini-m4"
+  },
+  "devices": {
+    "Mac15,8": {
+      "computer": "m3"
+    },
+    "Mac15,10": {
+      "computer": "m3"
+    },
+    "Mac15,6": {
+      "computer": "m3"
+    },
+    "Mac16,8": {
+      "computer": "m4"
+    },
+    "Mac16,6": {
+      "computer": "m4"
+    },
+    "Mac16,10": {
+      "computer": "mini-m4"
+    },
+    "Mac16,11": {
+      "computer": "mini-m4"
+    },
+    "Mac16,12": {
+      "computer": "air"
+    }
+  }
+}

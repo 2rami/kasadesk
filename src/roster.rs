@@ -103,6 +103,7 @@ impl DeviceKind {
 pub struct Machine {
     pub label: String,
     pub kind: DeviceKind,
+    pub model_id: Option<String>,
     /// 그 기기 `/version` 의 `kasanet`(`id`·`relay`·`addrs`·`screen`·`screen_node`).
     pub kasanet: Value,
     /// 이번에 본 앱에서 새로 배웠다 — 아니면 지난 명부 그대로다.
@@ -160,7 +161,7 @@ pub fn fetch(app: &str) -> Option<Snapshot> {
             let kind = DeviceKind::classify(&label, &version);
             let kasanet = version.get("kasanet")?.clone();
             let id = kasanet.get("id").and_then(Value::as_str);
-            (id.is_some() && id != own_id.as_deref()).then_some(Machine { label, kind, kasanet, fresh: true, account: None })
+            (id.is_some() && id != own_id.as_deref()).then_some(Machine { label, kind, model_id: version["model"].as_str().map(str::to_owned), kasanet, fresh: true, account: None })
         })
         .collect();
     Some(Snapshot { machines, app_alive: true, listed })
@@ -174,6 +175,10 @@ pub fn merge(fresh: Option<Snapshot>, cached: &[Machine]) -> Snapshot {
         return Snapshot { machines, app_alive: false, listed: Vec::new() };
     };
     for old in cached {
+        if let Some(current) = snap.machines.iter_mut().find(|m| m.label == old.label && m.model_id.is_none()
+            && m.kasanet.get("id").and_then(Value::as_str).is_some_and(|id| old.kasanet.get("id").and_then(Value::as_str) == Some(id))) {
+            current.model_id.clone_from(&old.model_id);
+        }
         if snap.listed.contains(&old.label) && !snap.machines.iter().any(|m| m.label == old.label) {
             snap.machines.push(Machine { fresh: false, ..old.clone() });
         }
@@ -189,6 +194,7 @@ pub fn with_account(snap: &mut Snapshot, account: Vec<Machine>) {
     for mut a in account {
         if let Some(local) = snap.machines.iter_mut().find(|m| id(m).is_some() && id(m) == id(&a)) {
             local.account = a.account;
+            if local.model_id.is_none() { local.model_id = a.model_id; }
             continue;
         }
         if snap.machines.iter().any(|m| m.label == a.label) {
@@ -211,14 +217,14 @@ pub fn load(path: &PathBuf) -> Vec<Machine> {
             let kind = m.get("kind").and_then(Value::as_str).and_then(DeviceKind::hint)
                 .unwrap_or_else(|| DeviceKind::classify(&label, &Value::Null));
             let kind = kind.with_label(&label);
-            Some(Machine { label, kind, kasanet: m.get("kasanet")?.clone(), fresh: false, account: None })
+            Some(Machine { label, kind, model_id: m["model"].as_str().map(str::to_owned), kasanet: m.get("kasanet")?.clone(), fresh: false, account: None })
         })
         .collect()
 }
 
 /// 기기 이름·종류와 공개키·주소만 남긴다.
 pub fn save(path: &PathBuf, machines: &[Machine]) {
-    let v: Vec<Value> = machines.iter().map(|m| json!({ "label": m.label, "kind": m.kind.tag(), "kasanet": m.kasanet })).collect();
+    let v: Vec<Value> = machines.iter().map(|m| json!({ "label": m.label, "kind": m.kind.tag(), "model": m.model_id, "kasanet": m.kasanet })).collect();
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, Value::Array(v).to_string()).is_ok() {
         let _ = std::fs::rename(&tmp, path);
@@ -230,7 +236,7 @@ mod tests {
     use super::*;
 
     fn m(label: &str, fresh: bool) -> Machine {
-        Machine { label: label.into(), kind: DeviceKind::Mini, kasanet: json!({ "id": label }), fresh, account: None }
+        Machine { label: label.into(), model_id: None, kind: DeviceKind::Mini, kasanet: json!({ "id": label }), fresh, account: None }
     }
 
     #[test]
