@@ -1,12 +1,10 @@
-//! 기기 고르기 방 — 아이소메트릭 모형 방 하나에 기기를 제자리에 둔다: 맥북은 책상 위, Windows 는 책상 위 모니터와 밑의 타워,
-//! 맥미니는 왼벽 선반. 창밖은 이 컴퓨터 시각의 하늘이다. 기기를 누르면 카메라가 그 화면 앞으로 다가간 뒤(`take_arrival`)
-//! 보기 화면으로 넘어가고, 돌아올 때는 거꾸로 빠져나온다(`surface`). 가만히 있을 때는 하늘만 가끔 다시 그린다.
+//! 궤도 관측실의 조작대에서 기기를 선택하면 카메라가 해당 화면으로 이동한다.
 
 mod gpu;
 mod mesh;
 
 use std::borrow::Cow;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use glam::{Mat4, Vec2, Vec3, vec2, vec3};
 use kasa_gridview::GridRenderer;
@@ -17,41 +15,39 @@ use crate::text::Ui;
 use mesh::{Model, Plan};
 
 const PAD: f32 = 24.0;
-const TOP: f32 = 78.0;
 const BOTTOM: f32 = 52.0;
 const TEXT: [u8; 4] = [244, 238, 228, 255];
-const MUTE: [u8; 4] = [170, 162, 152, 255];
-const WARM: [u8; 4] = [255, 208, 150, 255];
-const TAG: [u8; 4] = [34, 30, 29, 228];
+const MUTE: [u8; 4] = [184, 202, 211, 255];
+const WARM: [u8; 4] = [129, 228, 233, 255];
+const TAG: [u8; 4] = [14, 27, 37, 236];
 const LIVE: [u8; 4] = [130, 218, 146, 255];
-const IDLE: [u8; 4] = [128, 120, 112, 255];
+const IDLE: [u8; 4] = [138, 155, 164, 255];
 /// 다가가며 덮는 색 — 보기 화면 바탕(`desk::BG`)과 같다.
 const FADE: [u8; 3] = [24, 24, 27];
 /// 한 방에 놓는 기기 수 — 넘치면 장을 넘긴다.
 const PAGE: usize = 10;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-/// 가만히 있을 때도 이만큼마다 한 번 그려 구름·하늘빛을 옮긴다.
+/// 시간대에 따른 광량을 갱신할 때만 정지한 장면을 다시 그린다.
 const IDLE_TICK: Duration = Duration::from_secs(20);
 const LIFT_TIME: f32 = 0.16;
 const LIFT_HEIGHT: f32 = 0.45;
 const DIVE_TIME: f32 = 0.75;
-const EYE_DISTANCE: f32 = 80.0;
-const HOME_YAW: f32 = 0.64;
-const HOME_PITCH: f32 = 0.55;
+const FOV_Y: f32 = 0.76;
+const HOME_YAW: f32 = 0.13;
+const HOME_PITCH: f32 = 0.22;
 const LAPTOP_SLOT: f32 = 3.6;
-const DESKTOP_SLOT: f32 = 6.0;
+const DESKTOP_SLOT: f32 = 8.9;
 
 type Point = (f32, f32);
 type Rect = (f32, f32, f32, f32);
 
-/// 직교 카메라 — 바라보는 곳·방위각·내려다보는 각·화면 반 높이(세계 단위)·가까운 면.
+/// 바라보는 면의 반 높이로 거리를 정해 기기에 접근하는 동안에도 시야각을 유지한다.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct View {
     target: Vec3,
     yaw: f32,
     pitch: f32,
     half: f32,
-    near: f32,
 }
 
 impl View {
@@ -61,6 +57,10 @@ impl View {
         vec3(sy * cp, sp, cy * cp)
     }
 
+    fn with_look(self, look: Vec2) -> Self {
+        Self { yaw: self.yaw + look.x * 0.048, pitch: self.pitch - look.y * 0.026, ..self }
+    }
+
     fn mix(a: View, b: View, t: f32) -> View {
         View {
             target: a.target.lerp(b.target, t),
@@ -68,20 +68,18 @@ impl View {
             pitch: a.pitch + (b.pitch - a.pitch) * t,
             // 확대는 배율로 섞어야 고르게 다가간다.
             half: a.half * (b.half / a.half).powf(t),
-            // 앞을 가리는 의자 따위는 끝에 가서야 잘라 낸다.
-            near: a.near + (b.near - a.near) * t.powi(4),
         }
     }
 
     fn frame(&self, window: Point) -> Frame {
         let aspect = window.0 / window.1.max(1.0);
         let eye = self.direction();
-        let view = Mat4::look_at_rh(self.target + eye * EYE_DISTANCE, self.target, Vec3::Y);
-        let projection = Mat4::orthographic_rh(-self.half * aspect, self.half * aspect, -self.half, self.half, self.near, EYE_DISTANCE + 80.0);
+        let distance = self.half / (FOV_Y * 0.5).tan();
+        let view = Mat4::look_at_rh(self.target + eye * distance, self.target, Vec3::Y);
+        let projection = Mat4::perspective_rh(FOV_Y, aspect, 0.09, distance + 400.0);
         let clip_from_world = projection * view;
         let (day, dusk, indoor) = gpu::daylight();
-        let time = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| (d.as_secs() % 100_000) as f32);
-        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), eye, time, day, dusk, indoor }
+        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), eye, camera: self.target + eye * distance, day, dusk, indoor }
     }
 }
 
@@ -90,7 +88,7 @@ pub struct Frame {
     clip_from_world: Mat4,
     world_from_clip: Mat4,
     eye: Vec3,
-    time: f32,
+    camera: Vec3,
     day: f32,
     dusk: f32,
     indoor: f32,
@@ -168,11 +166,10 @@ impl Layout {
         let first = page * PAGE;
         let page_machines = &machines[first.min(machines.len())..machines.len().min(first + PAGE)];
         let slot = |kind| if kind == DeviceKind::Desktop { DESKTOP_SLOT } else { LAPTOP_SLOT };
-        let on_desk: Vec<usize> = (0..page_machines.len()).filter(|&i| page_machines[i].kind != DeviceKind::Mini).collect();
-        let minis: Vec<usize> = (0..page_machines.len()).filter(|&i| page_machines[i].kind == DeviceKind::Mini).collect();
-        let desk_len = (2.3 + on_desk.iter().map(|&i| slot(page_machines[i].kind)).sum::<f32>() + 1.9).max(9.5);
+        let on_desk: Vec<usize> = (0..page_machines.len()).filter(|&i| !page_machines[i].kind.on_rack()).collect();
+        let minis: Vec<usize> = (0..page_machines.len()).filter(|&i| page_machines[i].kind.on_rack()).collect();
+        let desk_len = (1.3 + on_desk.iter().map(|&i| slot(page_machines[i].kind)).sum::<f32>() + 1.3).max(5.6);
         let plan = Plan::new(desk_len, minis.len());
-        let dz = plan.desk_z();
         let mut parts = Vec::new();
         let mut x = plan.desk_start();
         for &i in &on_desk {
@@ -180,14 +177,20 @@ impl Layout {
             let cx = x + width / 2.0;
             x += width;
             if page_machines[i].kind == DeviceKind::Desktop {
-                parts.push(Part { device: i, model: Model::Monitor, position: vec3(cx, mesh::DESK_Y, dz - 0.3), lifts: true, main: true });
-                parts.push(Part { device: i, model: Model::Tower, position: vec3(cx + 1.0, 0.0, dz + 0.4), lifts: false, main: false });
+                parts.push(Part { device: i, model: Model::Monitor, position: vec3(cx - 1.70, mesh::DESK_Y, -0.3), lifts: true, main: true });
+                parts.push(Part { device: i, model: Model::Tower, position: vec3(cx + 2.66, mesh::DESK_Y, -0.35), lifts: false, main: false });
             } else {
-                parts.push(Part { device: i, model: Model::Laptop, position: vec3(cx, mesh::DESK_Y, dz + 0.7), lifts: true, main: true });
+                let model = match page_machines[i].kind {
+                    DeviceKind::Air => Model::Air,
+                    DeviceKind::Pro => Model::Pro,
+                    _ => Model::Laptop,
+                };
+                parts.push(Part { device: i, model, position: vec3(cx, mesh::DESK_Y, 0.25), lifts: true, main: true });
             }
         }
         for (k, &i) in minis.iter().enumerate() {
-            parts.push(Part { device: i, model: Model::Mini, position: plan.shelf_slot(k), lifts: true, main: true });
+            let model = if page_machines[i].kind == DeviceKind::MiniM4 { Model::MiniM4 } else { Model::Mini };
+            parts.push(Part { device: i, model, position: plan.shelf_slot(k), lifts: true, main: true });
         }
         let devices = (0..page_machines.len()).map(|i| Device { index: first + i, lift: 0.0, glow: 0.0 }).collect();
         Self { window, home: home_view(&plan, window), plan, devices, parts }
@@ -232,28 +235,19 @@ impl Layout {
         let (face, size, yaw, pitch) = part.model.face();
         let aspect = self.window.0 / self.window.1.max(1.0);
         let half = (size.y * 0.5 / 0.62).max(size.x * 0.5 / 0.84 / aspect);
-        Some(View { target: self.part_center(part) + face, yaw, pitch, half, near: EYE_DISTANCE - 2.5 })
+        Some(View { target: self.part_center(part) + face, yaw, pitch, half })
     }
 }
 
-/// 방 전체가 머리띠와 발띠 사이에 들어오게 맞춘 시점.
 fn home_view(plan: &Plan, (width, height): Point) -> View {
-    let probe = View { target: Vec3::ZERO, yaw: HOME_YAW, pitch: HOME_PITCH, half: 1.0, near: 0.1 };
-    let eye = probe.direction();
-    let right = Vec3::Y.cross(eye).normalize();
-    let up = eye.cross(right);
-    let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
-    for corner in plan.corners() {
-        let v = vec2(corner.dot(right), corner.dot(up));
-        lo = lo.min(v);
-        hi = hi.max(v);
+    let (desk_left, right) = plan.desk;
+    let left = desk_left - plan.rack_width();
+    let aspect = width / height.max(1.0);
+    let half = ((right - left + 3.5) / (2.0 * aspect) + 0.45).max(4.8);
+    View {
+        target: vec3((left + right) * 0.5, mesh::DESK_Y + 1.1 + half * 0.32, 0.0),
+        yaw: HOME_YAW, pitch: HOME_PITCH, half,
     }
-    let size = (hi - lo).max(Vec2::splat(1.0));
-    let mid = (lo + hi) * 0.5;
-    let room = vec2((width - PAD * 2.0).max(80.0), (height - TOP - BOTTOM).max(80.0));
-    let k = (room.x / size.x).min(room.y / size.y);
-    let shift = (TOP - BOTTOM) * 0.5 / k;
-    View { target: right * mid.x + up * (mid.y + shift), half: height / (2.0 * k), ..probe }
 }
 
 /// 다가가기 — `progress` 0 은 방, 1 은 화면 앞. `out` 이면 1 에서 0 으로 빠져나온다.
@@ -275,6 +269,7 @@ pub struct Room {
     layout: Option<Layout>,
     gpu: Option<gpu::RoomGpu>,
     pointer: Option<Point>,
+    look: Vec2,
     hovered: Option<usize>,
     keyboard: Option<String>,
     selected: Option<usize>,
@@ -309,7 +304,13 @@ impl Room {
 
     fn home_frame(&self) -> Option<Frame> {
         let layout = self.layout.as_ref()?;
-        Some(layout.home.frame(layout.window))
+        Some(layout.home.with_look(self.look).frame(layout.window))
+    }
+
+    fn look_target(pointer: Option<Point>, window: Point) -> Vec2 {
+        pointer.map_or(Vec2::ZERO, |(x, y)| {
+            (vec2(x / window.0, y / window.1) * 2.0 - Vec2::ONE).clamp(-Vec2::ONE, Vec2::ONE)
+        })
     }
 
     fn hit_at(&self, p: Point, hovered: Option<usize>) -> Option<usize> {
@@ -332,6 +333,7 @@ impl Room {
     }
 
     pub fn pointer(&mut self, point: Option<Point>) -> bool {
+        let moved = point != self.pointer;
         self.pointer = point;
         if self.dive.is_some() {
             return false;
@@ -339,9 +341,9 @@ impl Room {
         self.hovered = point.and_then(|p| self.hit_at(p, self.hovered));
         if point.is_some() {
             self.keyboard = None;
-            self.select(self.hovered)
+            self.select(self.hovered) || moved
         } else if self.keyboard.is_none() {
-            self.select(None)
+            self.select(None) || moved
         } else {
             false
         }
@@ -476,6 +478,7 @@ impl Room {
     pub fn next_frame(&self) -> Option<Instant> {
         let layout = self.layout.as_ref()?;
         let moving = self.dive.as_ref().is_some_and(|d| self.arrived.is_none() && (d.out || d.progress < 1.0))
+            || (self.dive.is_none() && self.look != Self::look_target(self.pointer, layout.window))
             || layout.devices.iter().any(|d| d.lift != lift_target(self.selected, d.index));
         if moving {
             return Some(self.animated_at.unwrap_or_else(Instant::now) + FRAME_INTERVAL);
@@ -487,6 +490,11 @@ impl Room {
         // 창이 멈췄다 깨어나도 다가가기를 건너뛰지 않게 한 번에 0.1초까지만.
         let elapsed = self.animated_at.replace(now).map_or(0.0, |at| now.saturating_duration_since(at).as_secs_f32()).min(0.1);
         let Some(layout) = &mut self.layout else { return };
+        if self.dive.is_none() {
+            let target = Self::look_target(self.pointer, layout.window);
+            self.look = self.look.lerp(target, 1.0 - (-elapsed * 12.0).exp());
+            if self.look.distance_squared(target) < 1e-5 { self.look = target; }
+        }
         let delta = elapsed / LIFT_TIME;
         for device in &mut layout.devices {
             let target = lift_target(self.selected, device.index);
@@ -528,11 +536,12 @@ impl Room {
         let layout = &*layout;
         let (width, height) = layout.window;
         let dive = self.dive.as_ref().map(|d| (d.index, d.eased(), d.progress));
-        let view = dive.and_then(|(i, t, _)| Some(View::mix(layout.home, layout.dive_view(i)?, t))).unwrap_or(layout.home);
+        let home_view = layout.home.with_look(self.look);
+        let view = dive.and_then(|(i, t, _)| Some(View::mix(home_view, layout.dive_view(i)?, t))).unwrap_or(home_view);
         let frame = view.frame(layout.window);
         let calm = 1.0 - dive.map_or(0.0, |(_, t, _)| smooth(0.0, 0.3, t));
 
-        let home = layout.home.frame(layout.window);
+        let home = home_view.frame(layout.window);
         let mut tags = Vec::new();
         if calm > 0.0 {
             // 고른 기기 먼저 제자리에, 나머지는 겹치면 위로 비켜 쌓는다 — 이름을 접지 않는다.
@@ -543,7 +552,8 @@ impl Room {
                 let focus = self.selected == Some(index);
                 let tag = Tag { name: &machines[index].label, path: &paths[index], live: live.get(index).copied().unwrap_or(false) };
                 let (w, h) = tag.size(g, ui, focus);
-                let mut rect = (at.x - w / 2.0, at.y - h - 8.0, w, h);
+                let left = (at.x - w / 2.0).clamp(4.0, (width - w - 4.0).max(4.0));
+                let mut rect = (left, at.y - h - 8.0, w, h);
                 for _ in 0..12 {
                     let Some(top) = placed.iter().filter(|(r, ..)| overlaps(*r, rect)).map(|(r, ..)| r.1).min_by(f32::total_cmp) else { break };
                     rect.1 = top - h - 4.0;
@@ -569,7 +579,7 @@ impl Room {
         ui.draw(g, PAD, 50.0, "화면을 볼 기기를 눌러 주세요", 13.0, fade(MUTE, calm), false);
         if machines.is_empty() {
             let text = if app_alive { "카사텀 명부에 기기를 추가하세요" } else { "카사텀을 띄우거나 로그인하면 기기가 보여요" };
-            let desk = home.project(vec3((layout.plan.desk.0 + layout.plan.desk.1) / 2.0, mesh::DESK_Y + 3.0, layout.plan.desk_z()));
+            let desk = home.project(vec3((layout.plan.desk.0 + layout.plan.desk.1) / 2.0, mesh::DESK_Y + 3.0, 0.0));
             let w = ui.measure(g, text, 14.0, false) + 32.0;
             g.round_rect_fill(desk.x - w / 2.0, desk.y - 18.0, w, 36.0, 18.0, TAG);
             ui.draw(g, desk.x - w / 2.0 + 16.0, desk.y - 9.0, text, 14.0, TEXT, false);
@@ -589,8 +599,12 @@ impl Room {
         let show_hint = !machines.is_empty() && width >= 680.0;
         let foot_width = width - PAD * 2.0 - if show_hint { hint_width + 24.0 } else { 0.0 };
         let foot = fit(g, ui, foot, 12.0, false, foot_width);
+        let foot_bg = fade(TAG, calm * 0.85);
+        let foot_text_width = ui.measure(g, &foot, 12.0, false);
+        g.round_rect_fill(PAD - 8.0, height - 36.0, foot_text_width + 16.0, 22.0, 5.0, foot_bg);
         ui.draw(g, PAD, height - 32.0, &foot, 12.0, fade(MUTE, calm), false);
         if show_hint {
+            g.round_rect_fill(width - PAD - hint_width - 8.0, height - 36.0, hint_width + 16.0, 22.0, 5.0, foot_bg);
             ui.draw(g, width - PAD - hint_width, height - 32.0, hint, 12.0, fade(MUTE, calm), false);
         }
         overlay(g, ui, (width, height));
@@ -603,9 +617,13 @@ impl Room {
         let arrived = dive.and_then(|(i, _, p)| (p >= 1.0 && self.dive.as_ref().is_some_and(|d| !d.out)).then_some(i));
         let gpu = &mut self.gpu;
         let result = g.render_with_underlay(0.0, true, |device, queue, encoder, texture, target, format| {
-            gpu.get_or_insert_with(|| gpu::RoomGpu::new(device, format)).draw(device, queue, encoder, texture, target, layout, &frame);
+            gpu.get_or_insert_with(|| gpu::RoomGpu::new(device, queue, format)).draw(device, queue, encoder, texture, target, layout, &frame);
         });
         self.tags = tags;
+        if self.keyboard.is_none() && self.dive.is_none() {
+            self.hovered = self.pointer.and_then(|p| self.hit_at(p, self.hovered));
+            self.select(self.hovered);
+        }
         if arrived.is_some() {
             self.arrived = arrived;
         }
@@ -648,9 +666,9 @@ impl Tag<'_> {
         let size = Self::text_size(focus);
         let (name, path) = self.lines(g, ui, focus);
         if focus {
-            g.round_rect_fill(x - 1.5, y - 1.5, w + 3.0, h + 3.0, 12.0, fade(WARM, alpha));
+            g.round_rect_fill(x - 1.5, y - 1.5, w + 3.0, h + 3.0, 7.0, fade(WARM, alpha));
         }
-        g.round_rect_fill(x, y, w, h, if focus { 11.0 } else { 13.0 }, bg);
+        g.round_rect_fill(x, y, w, h, 6.0, bg);
         let line = if focus { 7.0 } else { 5.5 };
         let dot = fade(if self.live { LIVE } else { IDLE }, alpha);
         g.round_rect_fill(x + 12.0, y + line + size * 0.6 - Self::DOT / 2.0, Self::DOT, Self::DOT, Self::DOT / 2.0, dot);
@@ -740,15 +758,35 @@ mod tests {
         let frame = layout.home.frame(layout.window);
         for part in &layout.parts {
             match part.model {
-                Model::Laptop | Model::Monitor => assert_eq!(part.position.y, mesh::DESK_Y),
-                Model::Tower => assert_eq!(part.position.y, 0.0),
-                Model::Mini => assert!(part.position.y > mesh::DESK_Y && part.position.x < layout.plan.desk.0),
+                Model::Laptop | Model::Air | Model::Pro | Model::Monitor => assert_eq!(part.position.y, mesh::DESK_Y),
+                Model::Tower => assert_eq!(part.position.y, mesh::DESK_Y),
+                Model::Mini | Model::MiniM4 => assert!(part.position.y > mesh::DESK_Y && part.position.x < layout.plan.desk.0),
             }
         }
-        for corner in layout.plan.corners() {
-            let p = frame.project(corner);
-            assert!(p.x >= PAD - 1.0 && p.x <= 1280.0 - PAD + 1.0, "{p}");
-            assert!(p.y >= TOP - 1.0 && p.y <= 800.0 - BOTTOM + 1.0, "{p}");
+        for part in &layout.parts {
+            let (center, half) = part.model.hull();
+            for side in [-1.0, 1.0] {
+                let p = frame.project(part.position + center + half * side);
+                assert!(p.x >= PAD && p.x <= 1280.0 - PAD, "{p}");
+                assert!(p.y >= 78.0 && p.y <= 800.0 - BOTTOM, "{p}");
+            }
+        }
+    }
+
+    #[test]
+    fn dense_stations_keep_each_device_pickable_as_the_camera_leans() {
+        for kind in [DeviceKind::Mini, DeviceKind::MiniM4, DeviceKind::Desktop, DeviceKind::Air, DeviceKind::Pro] {
+            let devices = machines(&[kind; PAGE]);
+            for window in [(600.0, 400.0), (1920.0, 700.0), (600.0, 900.0)] {
+                let layout = Layout::new(window, &devices, 0);
+                for look in [Vec2::ONE, -Vec2::ONE] {
+                    let frame = layout.home.with_look(look).frame(window);
+                    for i in 0..PAGE {
+                        let p = center(&layout, &frame, i);
+                        assert_eq!(layout.hit(&frame, p, None), Some(i), "{kind:?} {window:?} {look:?} {p:?}");
+                    }
+                }
+            }
         }
     }
 

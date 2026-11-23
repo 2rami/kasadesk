@@ -13,6 +13,7 @@ arboard = "3"
 base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.25"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 kasa-cast = { path = "kasaterm/crates/kasa-cast" }
 kasa-cells = { path = "kasaterm/crates/kasa-cells" }
 kasa-castview = { path = "kasaterm/crates/kasa-castview" }

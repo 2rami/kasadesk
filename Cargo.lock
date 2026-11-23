@@ -2180,6 +2180,7 @@ dependencies = [
  "base64 0.22.1",
  "bytemuck",
  "glam",
+ "image",
  "kasa-cast",
  "kasa-castview",
  "kasa-cells",

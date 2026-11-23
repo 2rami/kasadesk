@@ -3,6 +3,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
+use glam::{Mat4, Vec3, vec3};
 
 use super::mesh::{self, MODELS};
 use super::{Frame, Layout};
@@ -10,9 +11,6 @@ use super::{Frame, Layout};
 const VERTEX_ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
 const INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32, 5 => Float32];
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
-/// 모형 방 둘레 — 보기 화면 바탕(`desk::BG`)과 같은 색이라 다가간 뒤 넘어갈 때 이음매가 없다.
-const BG: wgpu::Color = wgpu::Color { r: 24.0 / 255.0, g: 24.0 / 255.0, b: 27.0 / 255.0, a: 1.0 };
-
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Instance {
@@ -25,17 +23,21 @@ struct Instance {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Scene {
     clip_from_world: [[f32; 4]; 4],
+    sun_clip: [[f32; 4]; 4],
     eye: [f32; 4],
-    params: [f32; 4],
-    lamp: [f32; 4],
-    desk_light: [f32; 4],
-    window: [f32; 4],
-    rug: [f32; 4],
+    camera: [f32; 4],
+    lighting: [f32; 4],
+    viewport: [f32; 4],
+    bench: [f32; 4],
 }
 
 pub struct RoomGpu {
+    backdrop: wgpu::RenderPipeline,
     solid: wgpu::RenderPipeline,
     glaze: wgpu::RenderPipeline,
+    shadows: wgpu::RenderPipeline,
+    shadow_depth: wgpu::TextureView,
+    shadow_binding: wgpu::BindGroup,
     scene: wgpu::Buffer,
     binding: wgpu::BindGroup,
     meshes: Option<(mesh::Plan, wgpu::Buffer, mesh::Meshes)>,
@@ -44,7 +46,7 @@ pub struct RoomGpu {
 }
 
 impl RoomGpu {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let scene = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("KasaDesk room scene"),
             size: std::mem::size_of::<Scene>() as u64,
@@ -55,6 +57,18 @@ impl RoomGpu {
             label: Some("KasaDesk room shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("room.wgsl").into()),
         });
+        let plate = image::load_from_memory_with_format(include_bytes!("../../assets/orbit.jpg"), image::ImageFormat::Jpeg)
+            .expect("embedded orbital panorama").into_rgba8();
+        let texture = device.create_texture_with_data(queue, &wgpu::TextureDescriptor {
+            label: Some("KasaDesk orbital horizon"),
+            size: wgpu::Extent3d { width: plate.width(), height: plate.height(), depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
+        }, wgpu::util::TextureDataOrder::LayerMajor, plate.as_raw());
+        let texture_view = texture.create_view(&Default::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default()
+        });
         let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("KasaDesk room scene layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -62,35 +76,79 @@ impl RoomGpu {
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                 count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None,
             }],
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("KasaDesk room pipeline layout"),
-            bind_group_layouts: &[&scene_layout],
-            immediate_size: 0,
+        let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("KasaDesk sunlight layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None,
+            }],
         });
-        let pipeline = |depth_write| {
+        let shadow_depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("KasaDesk sunlight depth"),
+            size: wgpu::Extent3d { width: 1536, height: 1536, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
+        }).create_view(&Default::default());
+        let comparison = device.create_sampler(&wgpu::SamplerDescriptor {
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default()
+        });
+        let shadow_binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("KasaDesk sunlight"), layout: &shadow_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&shadow_depth) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&comparison) },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("KasaDesk room pipeline layout"), bind_group_layouts: &[&scene_layout, &shadow_layout], immediate_size: 0,
+        });
+        let buffers = [
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex, attributes: &VERTEX_ATTRS,
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Instance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance, attributes: &INSTANCE_ATTRS,
+            },
+        ];
+        let depth_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("KasaDesk shadow pass layout"), bind_group_layouts: &[&scene_layout], immediate_size: 0,
+        });
+        let shadows = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("KasaDesk shadow pass"), layout: Some(&depth_layout),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("project_shadow"), buffers: &buffers, compilation_options: Default::default() },
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::LessEqual,
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 }, stencil: Default::default(),
+            }),
+            multisample: Default::default(), fragment: None, multiview_mask: None, cache: None,
+        });
+        let pipeline = |depth_write, backdrop| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("KasaDesk room pipeline"),
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some("project"),
-                    buffers: &[
-                        wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &VERTEX_ATTRS,
-                        },
-                        wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<Instance>() as u64,
-                            step_mode: wgpu::VertexStepMode::Instance,
-                            attributes: &INSTANCE_ATTRS,
-                        },
-                    ],
+                    entry_point: Some(if backdrop { "project_sky" } else { "project" }),
+                    buffers: if backdrop { &[] } else { &buffers },
                     compilation_options: Default::default(),
                 },
-                // 창틀·나뭇잎처럼 얇은 면이 있어 뒷면을 버리지 않는다.
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
@@ -102,7 +160,7 @@ impl RoomGpu {
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("shade"),
+                    entry_point: Some(if backdrop { "horizon" } else { "shade" }),
                     targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
                     compilation_options: Default::default(),
                 }),
@@ -110,15 +168,20 @@ impl RoomGpu {
                 cache: None,
             })
         };
-        let solid = pipeline(true);
+        let backdrop = pipeline(false, true);
+        let solid = pipeline(true, false);
         // 반투명 바닥 그림자·빛 웅덩이 — 깊이를 쓰지 않고 덧그린다.
-        let glaze = pipeline(false);
+        let glaze = pipeline(false, false);
         let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("KasaDesk room scene binding"),
             layout: &scene_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: scene.as_entire_binding() }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: scene.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&texture_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
         });
-        Self { solid, glaze, scene, binding, meshes: None, instances: None, depth: None }
+        Self { backdrop, solid, glaze, shadows, shadow_depth, shadow_binding, scene, binding, meshes: None, instances: None, depth: None }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -155,29 +218,28 @@ impl RoomGpu {
             });
             self.meshes = Some((layout.plan, buffer, meshes));
         }
-        let (lamp, lamp_height) = layout.plan.lamp();
-        let (desk_light, desk_light_width) = layout.plan.desk_light();
-        let (window, window_width) = layout.plan.window();
-        let (rug, rug_half) = layout.plan.rug();
+        let (left, right) = layout.plan.desk;
+        let left = left - layout.plan.rack_width();
+        let half = (right - left) * 0.5 + 8.0;
+        let target = vec3((left + right) * 0.5, mesh::DESK_Y, 0.0);
+        let sun = vec3(0.76, 0.45, -0.42).normalize();
+        let sun_view = Mat4::look_at_rh(target + sun * (half + 20.0), target, Vec3::Y);
+        let sun_clip = Mat4::orthographic_rh(-half, half, -half, half, 0.1, 2.0 * half + 45.0) * sun_view;
         queue.write_buffer(&self.scene, 0, bytemuck::bytes_of(&Scene {
             clip_from_world: frame.clip_from_world.to_cols_array_2d(),
+            sun_clip: sun_clip.to_cols_array_2d(),
             eye: frame.eye.extend(0.0).to_array(),
-            params: [frame.time, frame.day, frame.dusk, frame.indoor],
-            lamp: lamp.extend(lamp_height * 0.5).to_array(),
-            desk_light: desk_light.extend(desk_light_width * 0.5).to_array(),
-            window: window.extend(window_width).to_array(),
-            rug: [rug.x, rug.y, rug_half.x, rug_half.y],
+            camera: frame.camera.extend(1.0).to_array(),
+            lighting: [frame.day, frame.dusk, frame.indoor, 0.0],
+            viewport: [size.width as f32, size.height as f32, 0.0, 0.0],
+            bench: [left, right, mesh::DESK_Y, 0.0],
         }));
         // 방 한 칸 + 모형 종류마다 줄 세운 기기 자리.
         let mut data = vec![Instance { position: [0.0; 3], lift: 0.0, glow: 0.0 }];
         let mut ranges = Vec::new();
-        let mut raised = Vec::new();
-        for (kind, model) in MODELS.iter().enumerate() {
+        for model in &MODELS {
             let start = data.len() as u32;
             for (part, device) in layout.parts.iter().filter(|p| p.model == *model).map(|p| (p, &layout.devices[p.device])) {
-                if device.lift > 0.01 {
-                    raised.push((kind, data.len() as u32));
-                }
                 let lift = if part.lifts { device.lift } else { 0.0 };
                 data.push(Instance { position: part.position.to_array(), lift, glow: device.glow });
             }
@@ -195,13 +257,32 @@ impl RoomGpu {
         }
         let (Some((_, instances)), Some((_, vertices, meshes)), Some((_, depth))) = (&self.instances, &self.meshes, &self.depth) else { return };
         queue.write_buffer(instances, 0, bytemuck::cast_slice(&data));
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("KasaDesk sunlight"), color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadows);
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_vertex_buffer(1, instances.slice(..));
+            pass.set_bind_group(0, &self.binding, &[]);
+            pass.draw(meshes.room.clone(), 0..1);
+            for ((body, _), range) in meshes.models.iter().zip(&ranges) {
+                if !range.is_empty() { pass.draw(body.clone(), range.clone()); }
+            }
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("KasaDesk room"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(BG), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
@@ -215,6 +296,9 @@ impl RoomGpu {
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_vertex_buffer(1, instances.slice(..));
         pass.set_bind_group(0, &self.binding, &[]);
+        pass.set_bind_group(1, &self.shadow_binding, &[]);
+        pass.set_pipeline(&self.backdrop);
+        pass.draw(0..3, 0..1);
         pass.set_pipeline(&self.solid);
         pass.draw(meshes.room.clone(), 0..1);
         for ((body, _), range) in meshes.models.iter().zip(&ranges) {
@@ -223,10 +307,9 @@ impl RoomGpu {
             }
         }
         pass.set_pipeline(&self.glaze);
-        pass.draw(meshes.shadows.clone(), 0..1);
-        if !raised.is_empty() {
-            for (kind, i) in raised {
-                pass.draw(meshes.models[kind].1.clone(), i..i + 1);
+        for ((_, contact), range) in meshes.models.iter().zip(&ranges) {
+            if !range.is_empty() {
+                pass.draw(contact.clone(), range.clone());
             }
         }
     }

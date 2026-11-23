@@ -16,25 +16,64 @@ const BODY_MAX: u64 = 1 << 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceKind {
     Mini,
+    MiniM4,
     Laptop,
+    Air,
+    Pro,
     Desktop,
 }
 
 impl DeviceKind {
     fn hint(name: &str) -> Option<Self> {
         let name = name.to_lowercase();
+        // Apple Silicon 기종은 Mac16,12처럼 이름에 제품군이 빠지기도 한다.
+        match name.as_str() {
+            "mac14,2" | "mac14,15" | "mac15,12" | "mac15,13" | "mac16,12" | "mac16,13" |
+            "mac17,3" | "mac17,4" => return Some(Self::Air),
+            "mac14,5" | "mac14,6" | "mac14,7" | "mac14,9" | "mac14,10" | "mac15,3" |
+            "mac15,6" | "mac15,7" | "mac15,8" | "mac15,9" | "mac15,10" | "mac15,11" |
+            "mac16,1" | "mac16,5" | "mac16,6" | "mac16,7" | "mac16,8" | "mac17,2" |
+            "mac17,6" | "mac17,7" | "mac17,8" | "mac17,9" | "mac17,10" | "mac17,11" |
+            "mac17,12" | "mac17,13" | "mac18,1" => return Some(Self::Pro),
+            "mac16,10" | "mac16,11" => return Some(Self::MiniM4),
+            "mac14,3" | "mac14,12" | "mac17,16" | "mac18,5" => return Some(Self::Mini),
+            _ => {}
+        }
+        let compact = name.replace([' ', '-'], "");
+        if compact.contains("macbookair") || compact.contains("맥북에어") {
+            return Some(Self::Air);
+        }
+        if compact.contains("macbookpro") || compact.contains("맥북프로") {
+            return Some(Self::Pro);
+        }
         let words = name.split(|c: char| !c.is_alphanumeric());
         if name.contains("windows") || name.contains("windesk") || name.contains("윈도우")
-            || words.clone().any(|word| matches!(word, "win" | "win11" | "win10" | "desktop"))
+            || words.clone().any(|word| matches!(word, "win" | "win11" | "win10" | "desktop" | "pc"))
         {
             Some(Self::Desktop)
         } else if name.contains("macbook") || name.contains("맥북") || name == "laptop" {
             Some(Self::Laptop)
-        } else if name.contains("macmini") || name.contains("mac mini") || name.contains("맥미니") || name == "mini" {
-            Some(Self::Mini)
+        } else if compact.contains("macmini") || compact.contains("맥미니") || name == "mini" {
+            if name.split(|c: char| !c.is_alphanumeric()).any(|word| word == "m4") || compact.contains("미니m4") {
+                Some(Self::MiniM4)
+            } else {
+                Some(Self::Mini)
+            }
         } else {
             None
         }
+    }
+
+    fn with_label(self, label: &str) -> Self {
+        match (self, Self::hint(label)) {
+            (Self::Laptop, Some(family @ (Self::Air | Self::Pro))) => family,
+            (Self::Mini, Some(Self::MiniM4)) => Self::MiniM4,
+            _ => self,
+        }
+    }
+
+    pub fn on_rack(self) -> bool {
+        matches!(self, Self::Mini | Self::MiniM4)
     }
 
     pub fn classify(label: &str, version: &Value) -> Self {
@@ -44,13 +83,16 @@ impl DeviceKind {
             .filter_map(Value::as_str)
             .find_map(Self::hint)
             .or_else(|| Self::hint(label))
-            .unwrap_or(Self::Mini)
+            .unwrap_or(Self::Mini).with_label(label)
     }
 
     fn tag(self) -> &'static str {
         match self {
             Self::Mini => "mini",
+            Self::MiniM4 => "mac-mini-m4",
             Self::Laptop => "laptop",
+            Self::Air => "macbook-air",
+            Self::Pro => "macbook-pro",
             Self::Desktop => "desktop",
         }
     }
@@ -168,6 +210,7 @@ pub fn load(path: &PathBuf) -> Vec<Machine> {
             let label = m.get("label")?.as_str()?.to_string();
             let kind = m.get("kind").and_then(Value::as_str).and_then(DeviceKind::hint)
                 .unwrap_or_else(|| DeviceKind::classify(&label, &Value::Null));
+            let kind = kind.with_label(&label);
             Some(Machine { label, kind, kasanet: m.get("kasanet")?.clone(), fresh: false, account: None })
         })
         .collect()
@@ -194,6 +237,11 @@ mod tests {
     fn device_kind_uses_explicit_version_hints_and_works_with_old_rosters() {
         assert_eq!(DeviceKind::classify("Studio", &json!({"os": "windows"})), DeviceKind::Desktop);
         assert_eq!(DeviceKind::classify("현장 맥북", &Value::Null), DeviceKind::Laptop);
+        assert_eq!(DeviceKind::classify("랙", &json!({"model":"Mac16,10"})), DeviceKind::MiniM4);
+        assert_eq!(DeviceKind::hint(DeviceKind::MiniM4.tag()), Some(DeviceKind::MiniM4));
+        assert_eq!(DeviceKind::classify("빌드", &json!({"model": "Mac16,12"})), DeviceKind::Air);
+        assert_eq!(DeviceKind::classify("회사", &json!({"model": "MacBookPro18,3"})), DeviceKind::Pro);
+        assert_eq!(DeviceKind::classify("테스트 맥북 에어", &Value::Null), DeviceKind::Air);
         assert_eq!(DeviceKind::classify("Studio", &Value::Null), DeviceKind::Mini);
     }
 
