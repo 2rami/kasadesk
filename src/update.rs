@@ -100,7 +100,7 @@ pub fn verify(bytes: &[u8], signature_b64: &str, public_b64: &str) -> bool {
 }
 
 #[cfg(windows)]
-pub use windows::{install_now, start, Ready};
+pub use windows::{install_now, start};
 
 #[cfg(windows)]
 mod windows {
