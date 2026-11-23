@@ -572,6 +572,7 @@ impl Desk {
         };
         let paste = pressed && code == Some(KeyCode::KeyV) && (host || (cfg!(windows) && m.control_key() && !m.alt_key()));
         if paste {
+            view.forget_alone();
             if !event.repeat && view.control {
                 if let Some(text) = arboard::Clipboard::new().ok().and_then(|mut c| c.get_text().ok()) {
                     view.commit(&text);
@@ -793,11 +794,8 @@ impl ApplicationHandler<Ev> for Desk {
                 } else if self.focused == Some(id) {
                     if let Some(w) = self.windows.get_mut(&id) {
                         w.room.stop_navigation();
-                        // 누른 채 다른 앱으로 가면 뗌이 이 창에 안 온다 — 그 기기에 단추가 눌린 채 남지 않게 여기서 뗀다.
-                        let at = (f64::from(w.cursor.0), f64::from(w.cursor.1));
-                        if let Some(view) = w.view.as_mut().filter(|v| v.buttons != 0) {
-                            eprintln!("[kasadesk] 창을 떠나며 눌린 단추({})를 뗀다", view.buttons);
-                            view.pointer(at, 0, 0);
+                        if let Some(view) = w.view.as_mut() {
+                            view.focus_lost();
                         }
                     }
                     self.focused = None;
