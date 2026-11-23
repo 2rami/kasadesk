@@ -34,6 +34,13 @@ struct Scene {
     preview_rect: [f32; 4],
 }
 
+#[derive(Default)]
+struct ProductRanges {
+    body: Range<u32>,
+    glass: Range<u32>,
+    contact: Range<u32>,
+}
+
 pub struct RoomGpu {
     backdrop: wgpu::RenderPipeline,
     solid: wgpu::RenderPipeline,
@@ -47,7 +54,7 @@ pub struct RoomGpu {
     preview_texture: wgpu::Texture,
     preview_serial: u64,
     products: wgpu::Buffer,
-    ranges: Vec<(Range<u32>, Range<u32>)>,
+    ranges: Vec<ProductRanges>,
     instances: Option<(usize, wgpu::Buffer)>,
     depth: Option<(wgpu::Extent3d, wgpu::TextureView)>,
 }
@@ -97,14 +104,16 @@ impl RoomGpu {
         let mut ranges = Vec::new();
         let mut start = 0;
         for (layer, asset) in library.assets.iter().enumerate() {
-            let Some(g) = &asset.geometry else { ranges.push((0..0, 0..0)); continue };
+            let Some(g) = &asset.geometry else { ranges.push(ProductRanges::default()); continue };
             let end = start + g.vertices.len() as u32;
             queue.write_buffer(&products, u64::from(start) * stride, bytemuck::cast_slice(&g.vertices));
             let contact = mesh::contact(g.center, g.half);
             queue.write_buffer(&products, u64::from(end) * stride, bytemuck::cast_slice(&contact));
             let next = end + contact.len() as u32;
-            ranges.push((start..end, end..next));
+            let glass_start = start + g.opaque_count as u32;
+            ranges.push(ProductRanges { body: start..glass_start, glass: glass_start..end, contact: end..next });
             start = next;
+            if g.atlas.is_empty() { continue; }
             queue.write_texture(wgpu::TexelCopyTextureInfo {
                 texture: &model_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 }, aspect: wgpu::TextureAspect::All,
             }, &g.atlas, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * catalog::ATLAS_EDGE), rows_per_image: None },
@@ -349,8 +358,8 @@ impl RoomGpu {
             pass.set_bind_group(0, &self.binding, &[]);
             pass.draw(0..*room_count, 0..1);
             pass.set_vertex_buffer(0, self.products.slice(..));
-            for ((body, _), range) in self.ranges.iter().zip(&ranges) {
-                if !range.is_empty() { pass.draw(body.clone(), range.clone()); }
+            for (product, range) in self.ranges.iter().zip(&ranges) {
+                if !range.is_empty() { pass.draw(product.body.clone(), range.clone()); }
             }
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -379,15 +388,20 @@ impl RoomGpu {
         pass.set_pipeline(&self.solid);
         pass.draw(0..*room_count, 0..1);
         pass.set_vertex_buffer(0, self.products.slice(..));
-        for ((body, _), range) in self.ranges.iter().zip(&ranges) {
+        for (product, range) in self.ranges.iter().zip(&ranges) {
             if !range.is_empty() {
-                pass.draw(body.clone(), range.clone());
+                pass.draw(product.body.clone(), range.clone());
             }
         }
         pass.set_pipeline(&self.glaze);
-        for ((_, contact), range) in self.ranges.iter().zip(&ranges) {
+        for (product, range) in self.ranges.iter().zip(&ranges) {
             if !range.is_empty() {
-                pass.draw(contact.clone(), range.clone());
+                pass.draw(product.contact.clone(), range.clone());
+            }
+        }
+        for (product, range) in self.ranges.iter().zip(&ranges) {
+            if !range.is_empty() && !product.glass.is_empty() {
+                pass.draw(product.glass.clone(), range.clone());
             }
         }
     }

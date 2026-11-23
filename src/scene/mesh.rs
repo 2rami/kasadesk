@@ -1,6 +1,8 @@
 //! 관측실의 조작대와 기기 모형은 둥근 상자(`slab`)를 쌓아 짓는다. 길이 1 은 12.7cm 쯤이다(맥미니 19.7cm 가 1.55).
 //! 방은 배치(`Plan`)가 바뀔 때만 다시 짓고, 기기 모형은 종류마다 한 벌을 두고 자리(인스턴스)만 바꾼다.
 
+pub(super) mod y60;
+
 use std::f32::consts::FRAC_PI_2;
 
 use bytemuck::{Pod, Zeroable};
@@ -15,6 +17,8 @@ mod mat {
     pub const STRIP: f32 = 12.0;
     pub const WOOD: f32 = 13.0;
     pub const FABRIC: f32 = 14.0;
+    pub const GLASS: f32 = 15.0;
+    pub const RGB: f32 = 16.0;
 }
 
 const GRAPHITE: [u8; 3] = [61, 74, 84];

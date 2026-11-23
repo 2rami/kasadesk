@@ -159,6 +159,18 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
         let color = mix(vec3<f32>(0.006, 0.012, 0.020), accent(), s.lift);
         return vec4<f32>(color, 0.62 * (1.0 - smoothstep(0.26, 1.0, r)));
     }
+    if mode == 15.0 {
+        let view_dir = normalize(scene.camera.xyz - s.world);
+        let r = reflect(-view_dir, n);
+        let rim = pow(1.0 - abs(dot(view_dir, n)), 3.0);
+        let reflection = orbit(vec2<f32>(0.5 + 0.40*r.x, 0.50 - 0.45*r.y));
+        let sheen = smoothstep(0.72, 0.97, dot(r, normalize(vec3<f32>(0.65, 0.33, -0.68))));
+        let glass = mix(vec3<f32>(0.39, 0.55, 0.62), reflection, 0.55) + vec3<f32>(0.19)*sheen;
+        return vec4<f32>(glass, 0.15 + rim*0.34 + sheen*0.10);
+    }
+    if mode == 16.0 {
+        return out(base * (0.84 + 0.40*s.glow), 1.0);
+    }
     if mode == 9.0 {
         return vec4<f32>(vec3<f32>(1.0, 0.79, 0.53) * (0.84 + 0.14 * scene.lighting.z), 1.0);
     }

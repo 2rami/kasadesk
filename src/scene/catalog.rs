@@ -15,6 +15,7 @@ pub const VENDOR_MATERIAL: f32 = 32.0;
 
 pub struct Geometry {
     pub vertices: Vec<Vertex>,
+    pub opaque_count: usize,
     pub atlas: Vec<u8>,
     pub center: Vec3,
     pub half: Vec3,
@@ -38,7 +39,6 @@ pub fn library() -> &'static Catalog {
     static CATALOG: OnceLock<Catalog> = OnceLock::new();
     CATALOG.get_or_init(|| {
         let Some(dir) = directory() else { return Catalog::default() };
-        if !dir.join("catalog.json").is_file() { return Catalog::default() }
         Catalog::open(&dir).unwrap_or_else(|e| {
             eprintln!("[models] {}: {e:#}", dir.display());
             Catalog::default()
@@ -62,7 +62,11 @@ fn directory() -> Option<PathBuf> {
 
 impl Catalog {
     fn open(dir: &Path) -> Result<Self> {
-        let mut manifest: Value = serde_json::from_reader(std::fs::File::open(dir.join("catalog.json"))?)?;
+        let mut manifest: Value = match std::fs::File::open(dir.join("catalog.json")) {
+            Ok(f) => serde_json::from_reader(f)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::from_str(include_str!("../../scripts/official-models.json"))?,
+            Err(e) => return Err(e.into()),
+        };
         let bindings = dir.join("bindings.json");
         if bindings.is_file() {
             let overrides: HashMap<String, Value> = serde_json::from_reader(std::fs::File::open(bindings)?)?;
@@ -86,6 +90,9 @@ impl Catalog {
                     Err(e) => { eprintln!("[models] {key}: {e:#}"); None }
                 }
             } else { None };
+            let geometry = geometry.or_else(|| {
+                (key == "hyte-y60" && model == Model::Tower).then(super::mesh::y60::geometry)
+            });
             indices.insert(key.clone(), assets.len());
             assets.push(Asset { name, model, geometry });
         }
@@ -165,7 +172,7 @@ impl Geometry {
         let atlas = image::load_from_memory_with_format(&png, image::ImageFormat::Png)?.into_rgba8().into_raw();
         let screen = (screen_hi.x > screen_lo.x && screen_hi.y > screen_lo.y).then(||
             [screen_lo.x, screen_lo.y, screen_hi.x - screen_lo.x, screen_hi.y - screen_lo.y]);
-        Ok(Self { vertices, atlas, screen, center: (lo + hi) / 2.0, half: (hi - lo) / 2.0 })
+        Ok(Self { opaque_count: vertices.len(), vertices, atlas, screen, center: (lo + hi) / 2.0, half: (hi - lo) / 2.0 })
     }
 }
 
@@ -173,6 +180,19 @@ impl Geometry {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn y60_is_available_without_a_download_and_only_the_panes_are_translucent() {
+        let missing = std::env::temp_dir().join(format!("kasadesk-no-pack-{}", std::process::id()));
+        let catalog = Catalog::open(&missing).unwrap();
+        let geometry = catalog.assets[catalog.indices["hyte-y60"]].geometry.as_ref().unwrap();
+        assert!((geometry.half.y * 2.0 * 127.0 - 462.0).abs() < 0.1);
+        let (body, glass) = geometry.vertices.split_at(geometry.opaque_count);
+        assert!(body.iter().all(|v| v.material[3] != 15.0));
+        assert_eq!(glass.len(), 3 * 6);
+        assert!(glass.iter().all(|v| v.material[3] == 15.0));
+        assert!(geometry.vertices.iter().all(|v| Vec3::from_array(v.normal).is_finite()));
+    }
 
     #[test]
     fn a_bound_desktop_resolves_its_display_and_case_even_with_an_old_roster() {
