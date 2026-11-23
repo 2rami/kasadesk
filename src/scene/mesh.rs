@@ -18,9 +18,10 @@ mod mat {
     pub const OUTLINE: f32 = 6.0;
     pub const SKY: f32 = 7.0;
     pub const RUG: f32 = 8.0;
-    pub const SHADE: f32 = 9.0;
+    pub const LAMP: f32 = 9.0;
     pub const LEAF: f32 = 10.0;
     pub const WOOD: f32 = 11.0;
+    pub const DESK_LIGHT: f32 = 12.0;
 }
 
 const ALU: [u8; 3] = [200, 204, 210];
@@ -36,7 +37,7 @@ const FRAME: [u8; 3] = [246, 240, 230];
 const RUG: [u8; 3] = [104, 140, 134];
 const POT: [u8; 3] = [198, 122, 86];
 const LEAF: [u8; 3] = [88, 142, 90];
-const LAMP: [u8; 3] = [248, 218, 166];
+const FIXTURE: [u8; 3] = [48, 48, 54];
 const TOWER: [u8; 3] = [46, 49, 56];
 const BOOKS: [[u8; 3]; 5] = [[176, 74, 68], [72, 110, 158], [214, 176, 96], [96, 140, 104], [150, 110, 160]];
 
@@ -149,7 +150,7 @@ impl Plan {
     /// 창 가운데와 폭.
     pub fn window(&self) -> (Vec3, f32) {
         let (x0, x1) = self.desk;
-        let width = (x1 - x0).clamp(8.0, 13.0);
+        let width = (x1 - x0 + 1.6).min(21.0);
         (vec3((x0 + x1) / 2.0, WINDOW_LOW + WINDOW_H / 2.0, self.back() + 0.05), width)
     }
 
@@ -160,9 +161,13 @@ impl Plan {
         (center, vec2((self.width * 0.28).max(6.5), 3.0))
     }
 
-    /// 스탠드 갓 아래 — 셰이더의 따뜻한 점광 자리.
-    pub fn lamp(&self) -> Vec3 {
-        vec3(self.right() - 2.2, 11.0, self.back() + 2.6)
+    pub fn lamp(&self) -> (Vec3, f32) {
+        (vec3(self.right() - 2.2, 6.9, self.back() + 1.65), 8.2)
+    }
+
+    pub fn desk_light(&self) -> (Vec3, f32) {
+        let (x0, x1) = self.desk;
+        (vec3((x0 + x1) / 2.0, DESK_Y + 0.55, self.back() + 0.68), (x1 - x0 - 0.9).min(22.0))
     }
 
     /// 맥미니 자리(선반 칸 순서).
@@ -388,11 +393,14 @@ fn room(m: &mut Mesh, p: &Plan) {
         (wx, wy1, ww + 0.6, 0.45),
         (wx - ww / 2.0, window.y, 0.45, WINDOW_H),
         (wx + ww / 2.0, window.y, 0.45, WINDOW_H),
-        (wx, window.y, 0.22, WINDOW_H),
     ] {
         m.part([cx, cy, b + 0.2], [sx, sy, 0.35], 0.06, FRAME, mat::SOLID);
     }
     m.part([wx, wy0 - 0.25, b + 0.5], [ww + 1.2, 0.22, 0.9], 0.05, FRAME, mat::SOLID);
+
+    let (strip, strip_width) = p.desk_light();
+    m.slab(strip - Vec3::Z * 0.16, vec3(strip_width + 0.15, 0.28, 0.36), 0.12, FIXTURE, mat::SOLID);
+    m.slab(strip, vec3(strip_width, 0.11, 0.08), 0.035, FRAME, mat::DESK_LIGHT);
 
     // 책상 — 상판·다리·서랍.
     let (dx0, dx1) = p.desk;
@@ -446,12 +454,12 @@ fn room(m: &mut Mesh, p: &Plan) {
     let (rc, rh) = p.rug();
     m.part([rc.x, 0.04, rc.y], [rh.x * 2.0, 0.08, rh.y * 2.0], 0.6, RUG, mat::RUG);
 
-    // 스탠드 — 책상 오른쪽 뒤 구석.
-    let lamp = p.lamp();
+    let (lamp, lamp_height) = p.lamp();
+    let foot = lamp.y - lamp_height * 0.5;
     m.shadow(vec3(lamp.x, 0.0, lamp.z), (1.4, 1.4));
-    m.part([lamp.x, 0.12, lamp.z], [1.6, 0.24, 1.6], 0.75, [54, 56, 60], mat::SOLID);
-    m.part([lamp.x, lamp.y / 2.0, lamp.z], [0.18, lamp.y, 0.18], 0.08, [54, 56, 60], mat::SOLID);
-    m.part([lamp.x, lamp.y + 0.55, lamp.z], [2.2, 1.5, 2.2], 0.9, LAMP, mat::SHADE);
+    m.part([lamp.x, 0.14, lamp.z], [1.65, 0.28, 1.65], 0.8, FIXTURE, mat::SOLID);
+    m.part([lamp.x, foot * 0.5, lamp.z], [0.32, foot, 0.32], 0.14, FIXTURE, mat::SOLID);
+    m.slab(lamp, vec3(0.63, lamp_height, 0.63), 0.29, FRAME, mat::LAMP);
     // 오른쪽 앞 — 낮은 서랍장과 작은 화분.
     let (cx, cz) = (r - 1.6, f - 4.2);
     m.shadow(vec3(cx, 0.0, cz), (1.6, 2.6));

@@ -79,9 +79,9 @@ impl View {
         let view = Mat4::look_at_rh(self.target + eye * EYE_DISTANCE, self.target, Vec3::Y);
         let projection = Mat4::orthographic_rh(-self.half * aspect, self.half * aspect, -self.half, self.half, self.near, EYE_DISTANCE + 80.0);
         let clip_from_world = projection * view;
-        let (day, dusk, lamp) = gpu::daylight();
+        let (day, dusk, indoor) = gpu::daylight();
         let time = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| (d.as_secs() % 100_000) as f32);
-        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), eye, time, day, dusk, lamp }
+        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), eye, time, day, dusk, indoor }
     }
 }
 
@@ -93,7 +93,7 @@ pub struct Frame {
     time: f32,
     day: f32,
     dusk: f32,
-    lamp: f32,
+    indoor: f32,
 }
 
 impl Frame {

@@ -28,6 +28,7 @@ struct Scene {
     eye: [f32; 4],
     params: [f32; 4],
     lamp: [f32; 4],
+    desk_light: [f32; 4],
     window: [f32; 4],
     rug: [f32; 4],
 }
@@ -154,14 +155,16 @@ impl RoomGpu {
             });
             self.meshes = Some((layout.plan, buffer, meshes));
         }
-        let lamp = layout.plan.lamp();
+        let (lamp, lamp_height) = layout.plan.lamp();
+        let (desk_light, desk_light_width) = layout.plan.desk_light();
         let (window, window_width) = layout.plan.window();
         let (rug, rug_half) = layout.plan.rug();
         queue.write_buffer(&self.scene, 0, bytemuck::bytes_of(&Scene {
             clip_from_world: frame.clip_from_world.to_cols_array_2d(),
             eye: frame.eye.extend(0.0).to_array(),
-            params: [frame.time, frame.day, frame.dusk, frame.lamp],
-            lamp: lamp.extend(1.0).to_array(),
+            params: [frame.time, frame.day, frame.dusk, frame.indoor],
+            lamp: lamp.extend(lamp_height * 0.5).to_array(),
+            desk_light: desk_light.extend(desk_light_width * 0.5).to_array(),
             window: window.extend(window_width).to_array(),
             rug: [rug.x, rug.y, rug_half.x, rug_half.y],
         }));
@@ -229,13 +232,13 @@ impl RoomGpu {
     }
 }
 
-/// 이 컴퓨터 시각으로 (낮의 밝기, 해 질 녘, 스탠드) — 6시~18시가 낮, 그 앞뒤 한 시간씩 노을.
+/// 이 컴퓨터 시각으로 (낮의 밝기, 해 질 녘, 실내등) — 6시~18시가 낮, 그 앞뒤 한 시간씩 노을.
 pub fn daylight() -> (f32, f32, f32) {
     let hour = local_hour();
     let day = smooth(5.5, 7.0, hour) * (1.0 - smooth(17.5, 19.0, hour));
     let dusk = (1.0 - ((hour - 18.2).abs() / 1.0).min(1.0)).max(1.0 - ((hour - 6.2).abs() / 0.8).min(1.0));
-    let lamp = 1.0 - day * 0.75;
-    (day, dusk, lamp)
+    let indoor = 1.0 - day * 0.75;
+    (day, dusk, indoor)
 }
 
 fn smooth(a: f32, b: f32, x: f32) -> f32 {

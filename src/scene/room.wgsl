@@ -1,12 +1,13 @@
-// 아늑한 방 — 재질 번호는 mesh.rs `mat` 과 같다. 빛은 창의 하늘빛(낮에 세다)과 스탠드의 따뜻한 점광(저녁·밤에 세다) 둘이고,
-// 선형 공간에서 셈해 sRGB 로 내보낸다(창 표면은 sRGB 접미가 없는 형식이다).
+// 재질 번호는 mesh.rs `mat` 과 같다. 빛은 선형 공간에서 셈해 sRGB 로 내보낸다(창 표면은 sRGB 접미가 없는 형식이다).
 
 struct Scene {
     clip_from_world: mat4x4<f32>,
     eye: vec4<f32>,
-    // x 시간(초), y 낮 0..1, z 해 질 녘 0..1, w 스탠드 0..1
+    // x 시간(초), y 낮 0..1, z 해 질 녘 0..1, w 실내등 0..1
     params: vec4<f32>,
+    // 모형의 가운데(xyz)와 반 길이(w)를 받아 빛의 범위를 맞춘다.
     lamp: vec4<f32>,
+    desk_light: vec4<f32>,
     // 창 가운데(xyz)와 폭(w) — 높이는 WINDOW_H
     window: vec4<f32>,
     // 러그 가운데(xy = 세계 xz)와 반 크기(zw)
@@ -65,19 +66,33 @@ fn fbm(p: vec2<f32>) -> f32 {
 }
 
 // 창밖 — 낮·노을·밤 하늘과 흐르는 구름, 밤엔 별. sRGB 로 돌려준다.
-fn sky(t: f32, u: f32, v: f32) -> vec3<f32> {
+fn sky(t: f32, u: f32, v: f32, width: f32) -> vec3<f32> {
     let day = scene.params.y;
     let dusk = scene.params.z;
-    var col = mix(mix(vec3<f32>(0.10, 0.12, 0.24), vec3<f32>(0.04, 0.06, 0.15), v), mix(vec3<f32>(0.74, 0.86, 0.96), vec3<f32>(0.38, 0.62, 0.92), v), day);
-    col = mix(col, mix(vec3<f32>(1.0, 0.62, 0.40), vec3<f32>(0.46, 0.40, 0.62), v), dusk * (1.0 - v * 0.4));
-    let clouds = smoothstep(0.5, 0.78, fbm(vec2<f32>(u * 2.2 + t * 0.004, v * 1.6 + 3.0)));
-    let cloud_col = mix(vec3<f32>(0.28, 0.30, 0.40), vec3<f32>(1.0, 0.99, 0.97), day) + vec3<f32>(0.3, 0.12, 0.02) * dusk;
-    col = mix(col, cloud_col, clouds * (0.5 + 0.4 * day));
-    let star = step(0.996, hash(floor(vec2<f32>(u * 60.0, v * 40.0)))) * (1.0 - day) * (1.0 - clouds) * (1.0 - dusk);
-    // 아래쪽에 먼 언덕.
-    let hill = smoothstep(0.0, 0.01, 0.16 + 0.06 * sin(u * 7.0) + 0.04 * sin(u * 17.0 + 1.0) - v);
-    let hill_col = mix(vec3<f32>(0.08, 0.10, 0.14), vec3<f32>(0.42, 0.58, 0.46), day) + vec3<f32>(0.12, 0.04, 0.0) * dusk;
-    return mix(col + vec3<f32>(star), hill_col, hill);
+    let x = u * width / WINDOW_H;
+    let night = (1.0 - day) * (1.0 - dusk);
+    let horizon = mix(vec3<f32>(0.23, 0.25, 0.44), vec3<f32>(0.88, 0.92, 0.95), day);
+    let zenith = mix(vec3<f32>(0.05, 0.08, 0.23), vec3<f32>(0.29, 0.59, 0.87), day);
+    var col = mix(horizon, zenith, v);
+    col = mix(col, mix(vec3<f32>(1.0, 0.61, 0.46), vec3<f32>(0.29, 0.26, 0.53), v), dusk);
+    let moon_distance = length(vec2<f32>((u - 0.72) * width / WINDOW_H, v - 0.73));
+    col += vec3<f32>(0.11, 0.16, 0.29) * exp(-moon_distance * 8.0) * night;
+    let moon = (1.0 - smoothstep(0.048, 0.053, moon_distance)) * night;
+    col = mix(col, vec3<f32>(0.88, 0.92, 1.0), moon);
+    let grid = vec2<f32>(x, v) * 33.0;
+    let star = step(0.981, hash(floor(grid))) * (1.0 - smoothstep(0.03, 0.16, length(fract(grid) - vec2<f32>(0.5))));
+    col += vec3<f32>(0.58, 0.65, 0.83) * star * night;
+    let clouds = smoothstep(0.49, 0.78, fbm(vec2<f32>(x * 0.8 + t * 0.003, v * 4.0 + 3.0)));
+    let cloud_col = mix(vec3<f32>(0.27, 0.29, 0.47), vec3<f32>(0.98, 0.99, 1.0), day) + vec3<f32>(0.37, 0.16, 0.06) * dusk;
+    col = mix(col, cloud_col, clouds * (0.41 + 0.38 * day));
+    for (var layer = 0; layer < 3; layer += 1) {
+        let depth = f32(layer) * 0.5;
+        let ridge = 0.31 - 0.17 * depth + (fbm(vec2<f32>(x * 1.8 + 5.0 * depth, 4.2)) - 0.5) * 0.35;
+        let hill = mix(vec3<f32>(0.16, 0.20, 0.36), vec3<f32>(0.43, 0.61, 0.62), day)
+            * (1.0 - 0.51 * depth) + vec3<f32>(0.14, 0.04, 0.08) * dusk;
+        col = mix(col, hill, 1.0 - smoothstep(ridge, ridge + 0.007, v));
+    }
+    return col;
 }
 
 fn plank(world: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
@@ -92,10 +107,24 @@ fn plank(world: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
     return base * tint * grain * (1.0 - seam * 0.45);
 }
 
+fn lamp_color() -> vec3<f32> {
+    return vec3<f32>(1.0, 0.53, 0.28);
+}
+
+fn desk_light_color() -> vec3<f32> {
+    let sky_tone = mix(vec3<f32>(0.27, 0.34, 1.0), vec3<f32>(0.26, 0.69, 1.0), scene.params.y);
+    return mix(sky_tone, vec3<f32>(1.0, 0.29, 0.37), scene.params.z);
+}
+
+fn line_light(delta: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
+    let d2 = max(dot(delta, delta), 0.001);
+    return max(dot(n, delta) * inverseSqrt(d2), 0.0) * reach / (reach + d2);
+}
+
 fn light(world: vec3<f32>, n: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
     let day = scene.params.y;
     let dusk = scene.params.z;
-    let lamp_on = scene.params.w;
+    let indoor = scene.params.w;
     let sky_col = mix(vec3<f32>(0.30, 0.34, 0.52), vec3<f32>(1.0, 0.97, 0.92), day) + vec3<f32>(0.30, 0.12, 0.0) * dusk;
     let hemi = 0.6 + 0.4 * n.y;
     var col = base * sky_col * (0.2 + 0.24 * day) * hemi;
@@ -104,11 +133,12 @@ fn light(world: vec3<f32>, n: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
     let to_window = w - world;
     let dw = length(to_window);
     col = col + base * sky_col * max(dot(n, to_window / dw), 0.0) * (0.06 + 0.55 * day) * (12.0 / (12.0 + dw));
-    // 스탠드.
-    let to_lamp = scene.lamp.xyz - world;
-    let d = length(to_lamp);
-    let lamp = max(dot(n, to_lamp / d), 0.0) * 40.0 / (40.0 + d * d);
-    col = col + base * vec3<f32>(1.0, 0.66, 0.36) * lamp * (0.15 + 0.85 * lamp_on);
+    var lamp = scene.lamp.xyz - world;
+    lamp.y -= clamp(lamp.y, -scene.lamp.w, scene.lamp.w);
+    var strip = scene.desk_light.xyz - world;
+    strip.x -= clamp(strip.x, -scene.desk_light.w, scene.desk_light.w);
+    col += base * lamp_color() * line_light(lamp, n, 20.0) * (0.15 + 0.64 * indoor);
+    col += base * desk_light_color() * line_light(strip, n, 6.5) * (0.08 + 0.62 * indoor);
     return col;
 }
 
@@ -155,7 +185,7 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
         let w = scene.window;
         let u = (s.world.x - (w.x - w.w * 0.5)) / w.w;
         let v = clamp((s.world.y - (w.y - WINDOW_H * 0.5)) / WINDOW_H, 0.0, 1.0);
-        return vec4<f32>(sky(t, u * w.w / 6.0, v), 1.0);
+        return vec4<f32>(sky(t, u, v, w.w), 1.0);
     }
     if mode == 8.0 {
         let q = abs(s.world.xz - scene.rug.xy) / scene.rug.zw;
@@ -166,12 +196,14 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
         return out(light(s.world, n, tone), 1.0);
     }
     if mode == 9.0 {
-        let on = scene.params.w;
-        return out(base * (0.3 + 0.75 * on), 1.0);
+        return out(lamp_color() * (0.25 + 0.95 * scene.params.w), 1.0);
     }
     if mode == 10.0 {
         let tone = base * (0.8 + 0.4 * noise(s.world.xy * 2.0));
         return out(light(s.world, n, tone), 1.0);
+    }
+    if mode == 12.0 {
+        return out(desk_light_color() * (0.35 + 0.85 * scene.params.w), 1.0);
     }
     var tone = base;
     if mode == 11.0 {
