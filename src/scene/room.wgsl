@@ -9,6 +9,7 @@ struct Scene {
     viewport: vec4<f32>,
     bench: vec4<f32>,
     preview_rect: vec4<f32>,
+    fan_colors: array<vec4<f32>,12>,
 };
 
 @group(0) @binding(0) var<uniform> scene: Scene;
@@ -18,6 +19,8 @@ struct Scene {
 @group(0) @binding(3) var products: texture_2d_array<f32>;
 
 @group(0) @binding(4) var preview_image: texture_2d<f32>;
+
+@group(0) @binding(5) var kraken_lcd: texture_2d<f32>;
 
 @group(1) @binding(0) var shadow_map: texture_depth_2d;
 @group(1) @binding(1) var compare_depth: sampler_comparison;
@@ -66,6 +69,7 @@ struct Vertex {
     @location(5) glow: f32,
     @location(6) uv: vec2<f32>,
     @location(7) preview: f32,
+    @location(8) rgb: f32,
 };
 
 struct Surface {
@@ -78,6 +82,7 @@ struct Surface {
     @location(5) @interpolate(flat) glow: f32,
     @location(6) uv: vec2<f32>,
     @location(7) @interpolate(flat) preview: f32,
+    @location(8) @interpolate(flat) rgb: f32,
 };
 
 @vertex
@@ -91,7 +96,7 @@ fn project(v: Vertex) -> Surface {
     // 빛 웅덩이는 들리지 않고 바닥(책상)에 남는다.
     let rise = select(v.lift * 0.45, 0.0, v.material.w == 6.0);
     let world = v.position + v.point + vec3<f32>(0.0, rise, 0.0);
-    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.point, v.material, v.lift, v.glow, v.uv, v.preview);
+    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.point, v.material, v.lift, v.glow, v.uv, v.preview, v.rgb);
 }
 
 fn lin(c: vec3<f32>) -> vec3<f32> {
@@ -167,6 +172,19 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
         let sheen = smoothstep(0.72, 0.97, dot(r, normalize(vec3<f32>(0.65, 0.33, -0.68))));
         let glass = mix(vec3<f32>(0.39, 0.55, 0.62), reflection, 0.55) + vec3<f32>(0.19)*sheen;
         return vec4<f32>(glass, 0.15 + rim*0.34 + sheen*0.10);
+    }
+    if mode == 29.0 {
+        if s.rgb < 1.5 { discard; }
+        return vec4<f32>(textureSampleLevel(kraken_lcd, linear_sampler, s.uv, 0.0).rgb, 1.0);
+    }
+    if mode >= 17.0 && mode < 29.0 {
+        let fan = scene.fan_colors[u32(mode - 17.0)];
+        let lamp = select(base, lin(fan.rgb), s.rgb > 0.5 && fan.a > 0.5);
+        if s.uv.x > 0.5 {
+            let diffuse = select(light(s,n,base),light(s,n,base)*0.30 + lamp*0.64,s.rgb>0.5 && fan.a>0.5);
+            return out(diffuse,1.0);
+        }
+        return out(lamp * (0.84 + 0.40*s.glow), 1.0);
     }
     if mode == 16.0 {
         return out(base * (0.84 + 0.40*s.glow), 1.0);

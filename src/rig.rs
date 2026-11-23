@@ -18,6 +18,8 @@ enum Action {
 }
 
 pub enum PickerAction {
+    Resize(u32, u32),
+    HandOff,
     Travel(KeyCode, bool),
     Scroll(f32),
     Drag(bool),
@@ -29,6 +31,12 @@ pub enum PickerAction {
 impl PickerAction {
     fn parse(action: &str, argument: &str) -> Option<Self> {
         match action {
+            "handoff" if argument == "live" => Some(Self::HandOff),
+            "resize" => {
+                let (w, h) = argument.split_once('x')?;
+                let (w, h) = (w.parse().ok()?, h.parse().ok()?);
+                ((360..=4096).contains(&w) && (300..=2160).contains(&h)).then_some(Self::Resize(w, h))
+            }
             "down" | "up" => Some(Self::Travel(match argument {
                 "W" => KeyCode::KeyW, "A" => KeyCode::KeyA, "S" => KeyCode::KeyS, "D" => KeyCode::KeyD,
                 "Home" => KeyCode::Home, _ => return None,
@@ -209,6 +217,10 @@ impl Rig {
         [self.quit_at, self.capture.as_ref().map(|(at, _)| *at)]
             .into_iter().flatten().filter(|at| *at > now)
             .chain(self.picker_input.iter().flatten().map(|(at, _)| *at)).min()
+    }
+
+    pub fn release_picker(&mut self) {
+        self.picker_input = None;
     }
 
     pub fn drives_picker(&self) -> bool {

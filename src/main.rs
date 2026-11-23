@@ -13,6 +13,7 @@ mod login;
 mod net;
 mod preview;
 mod rig;
+mod rgb;
 mod roster;
 mod scene;
 mod text;

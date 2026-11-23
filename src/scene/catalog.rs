@@ -105,6 +105,10 @@ impl Catalog {
             .into_iter().flatten().find_map(|id| bindings[id][slot].as_str())
     }
 
+    pub fn is_y60(&self, asset: Option<usize>) -> bool {
+        asset.is_some() && asset == self.indices.get("hyte-y60").copied()
+    }
+
     pub fn description(&self, machine: &Machine) -> Option<&str> {
         self.binding(machine, "description")
     }

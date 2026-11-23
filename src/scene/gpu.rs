@@ -10,7 +10,7 @@ use std::ops::Range;
 use super::{Frame, Layout};
 
 const VERTEX_ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 6 => Float32x2];
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32, 5 => Float32, 7 => Float32];
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32, 5 => Float32, 7 => Float32, 8 => Float32];
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -19,6 +19,7 @@ struct Instance {
     lift: f32,
     glow: f32,
     preview: f32,
+    rgb: f32,
 }
 
 #[repr(C)]
@@ -32,6 +33,7 @@ struct Scene {
     viewport: [f32; 4],
     bench: [f32; 4],
     preview_rect: [f32; 4],
+    fan_colors: [[f32; 4]; 12],
 }
 
 #[derive(Default)]
@@ -51,6 +53,8 @@ pub struct RoomGpu {
     scene: wgpu::Buffer,
     binding: wgpu::BindGroup,
     room: Option<(mesh::Plan, wgpu::Buffer, u32)>,
+    lcd_texture: wgpu::Texture,
+    lcd_serial: u64,
     preview_texture: wgpu::Texture,
     preview_serial: u64,
     products: wgpu::Buffer,
@@ -125,6 +129,17 @@ impl RoomGpu {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
         });
         let preview_view = preview_texture.create_view(&Default::default());
+        let lcd_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Kraken LCD"),
+            size: wgpu::Extent3d { width: 192, height: 192, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let lcd_view = lcd_texture.create_view(&Default::default());
         let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("KasaDesk room scene layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -145,6 +160,10 @@ impl RoomGpu {
                     view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false }, count: None,
             }, wgpu::BindGroupLayoutEntry {
                 binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None,
             }],
@@ -245,9 +264,28 @@ impl RoomGpu {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&atlas_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&preview_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&lcd_view) },
             ],
         });
-        Self { backdrop, solid, glaze, shadows, shadow_depth, shadow_binding, scene, binding, room: None, preview_texture, preview_serial: 0, products, ranges, instances: None, depth: None }
+        Self {
+            backdrop,
+            solid,
+            glaze,
+            shadows,
+            shadow_depth,
+            shadow_binding,
+            scene,
+            binding,
+            room: None,
+            lcd_texture,
+            lcd_serial: 0,
+            preview_texture,
+            preview_serial: 0,
+            products,
+            ranges,
+            instances: None,
+            depth: None,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -261,6 +299,7 @@ impl RoomGpu {
         layout: &Layout,
         frame: &Frame,
         preview: Option<(usize, &crate::preview::Picture)>,
+        rgb: Option<(usize, &crate::rgb::Snapshot)>,
     ) {
         let size = texture.size();
         if self.depth.as_ref().is_none_or(|(old, _)| *old != size) {
@@ -292,6 +331,17 @@ impl RoomGpu {
         let sun = vec3(0.76, 0.45, -0.42).normalize();
         let sun_view = Mat4::look_at_rh(target + sun * (half + 20.0), target, Vec3::Y);
         let sun_clip = Mat4::orthographic_rh(-half, half, -half, half, 0.1, 2.0 * half + 45.0) * sun_view;
+        if let Some((_, snap)) = rgb {
+            if let Some(img) = snap.lcd.as_ref().filter(|_| self.lcd_serial != snap.serial) {
+                queue.write_texture(
+                    self.lcd_texture.as_image_copy(),
+                    img.as_raw(),
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(img.width() * 4), rows_per_image: None },
+                    wgpu::Extent3d { width: img.width(), height: img.height(), depth_or_array_layers: 1 },
+                );
+                self.lcd_serial = snap.serial;
+            }
+        }
         let mut preview_rect = [0.0; 4];
         let mut preview_size = (0, 0);
         if let Some((index, pic)) = preview {
@@ -315,17 +365,18 @@ impl RoomGpu {
             camera: frame.camera.extend(1.0).to_array(),
             lighting: [frame.day, frame.dusk, frame.indoor, 0.0],
             viewport: [size.width as f32, size.height as f32, preview_size.0 as f32, preview_size.1 as f32],
-            preview_rect,
+            preview_rect, fan_colors:rgb.map_or([[0.0;4];12],|(_,s)|s.lights()),
             bench: [left, right, mesh::DESK_Y, 0.0],
         }));
         // 방 한 칸 + 모형 종류마다 줄 세운 기기 자리.
-        let mut data = vec![Instance { position: [0.0; 3], lift: 0.0, glow: 0.0, preview: 0.0 }];
+        let mut data = vec![Instance { position: [0.0; 3], lift: 0.0, glow: 0.0, preview: 0.0, rgb: 0.0 }];
         let mut ranges = Vec::new();
         for index in 0..self.ranges.len() {
             let start = data.len() as u32;
             for (part, device) in layout.parts.iter().filter(|p| p.asset == Some(index)).map(|p| (p, &layout.devices[p.device])) {
                 let lift = if part.lifts { device.lift } else { 0.0 };
                 data.push(Instance { position: part.position.to_array(), lift, glow: device.glow,
+                    rgb:rgb.filter(|(i,_)|*i==device.index && part.model==mesh::Model::Tower).map_or(0.0,|(_,s)|if s.lcd.is_some(){2.0}else{1.0}),
                     preview: f32::from(part.main && preview_size.0 != 0 && preview.is_some_and(|(i,_)| i == device.index)) });
             }
             ranges.push(start..data.len() as u32);

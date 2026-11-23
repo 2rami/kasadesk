@@ -314,6 +314,7 @@ pub struct Room {
     pointer: Option<Point>,
     look: Vec2,
     free: Option<View>,
+    prior_rgb_view: Option<Option<View>>,
     movement: [bool; 4],
     dragging: Option<Point>,
     hovered: Option<usize>,
@@ -345,7 +346,7 @@ impl Room {
     }
 
     pub fn suspend(&mut self) {
-        *self = Self { free: self.free, ..Self::default() };
+        *self = Self { free: self.prior_rgb_view.take().unwrap_or(self.free), ..Self::default() };
     }
 
     fn home_frame(&self) -> Option<Frame> {
@@ -539,6 +540,55 @@ impl Room {
         self.select(Some(found))
     }
 
+    pub fn rgb_index(&self, machines: &[Machine], config: Option<&crate::rgb::Config>) -> Option<usize> {
+        let config = config?;
+        let layout = self.layout.as_ref()?;
+        if self.dive.is_some() {
+            return None;
+        }
+        let tower = layout.parts.iter().find(|p| {
+            p.model == Model::Tower
+                && catalog::library().is_y60(p.asset)
+                && p.bounds.is_some()
+                && machines.get(layout.devices[p.device].index).is_some_and(|m| config.matches(m))
+        })?;
+        Some(layout.devices[tower.device].index)
+    }
+
+    pub fn fan_hit(&self, index: usize, p: Point) -> Option<usize> {
+        let layout = self.layout.as_ref()?;
+        let part = layout.parts.iter().find(|p| p.model == Model::Tower && layout.devices[p.device].index == index)?;
+        let frame = self.home_frame()?;
+        if layout.hit(&frame, p, None) != Some(index) {
+            return None;
+        }
+        let ray = frame.ray(p)?;
+        mesh::y60::fan_hit(ray.origin - layout.part_center(part), ray.direction)
+    }
+
+    pub fn rgb_view(&mut self, index: Option<usize>) {
+        self.stop_navigation();
+        self.tags.clear();
+        if let Some(index) = index {
+            if self.prior_rgb_view.is_some() {
+                return;
+            }
+            let Some(l) = &self.layout else { return };
+            let Some(p) = l.parts.iter().find(|p| p.model == Model::Tower && l.devices[p.device].index == index) else { return };
+            let (center, half) = p.bounds.unwrap_or_else(|| p.model.hull());
+            let aspect = l.window.0 / l.window.1.max(1.0);
+            let framing = (half.y * 1.60).max(half.x * 1.90 / aspect);
+            let yaw = 0.065_f32;
+            let right = vec3(yaw.cos(), 0.0, -yaw.sin());
+            let shift = if l.window.0 > 580.0 { framing * aspect * (380.0 / l.window.0).min(0.58) } else { 0.0 };
+            self.prior_rgb_view = Some(self.free);
+            self.free =
+                Some(View { target: p.position + center - right * shift + Vec3::Y * 0.12, yaw, pitch: 0.10, half: framing });
+        } else if let Some(v) = self.prior_rgb_view.take() {
+            self.free = v;
+        }
+    }
+
     pub fn has_screen(&self, index: usize) -> bool {
         self.layout.as_ref().and_then(|l| l.main_part(l.device_of(index)?)).and_then(Part::asset)
             .and_then(|a| a.geometry.as_ref()?.screen).is_some()
@@ -642,6 +692,8 @@ impl Room {
     pub fn paint(
         &mut self,
         preview: Option<(usize, &crate::preview::Picture)>,
+        rgb: Option<(usize, &crate::rgb::Snapshot)>,
+        editing: Option<(usize, usize)>,
         g: &mut GridRenderer,
         ui: &mut Ui,
         machines: &[Machine],
@@ -669,7 +721,7 @@ impl Room {
 
         let home = home_view.frame(layout.window);
         let mut tags = Vec::new();
-        if calm > 0.0 {
+        if calm > 0.0 && editing.is_none() {
             // 고른 기기 먼저 제자리에, 나머지는 겹치면 위로 비켜 쌓는다 — 이름을 접지 않는다.
             let mut anchors: Vec<_> = layout.anchors(&home).into_iter()
                 .map(|(i, p)| (i, p, machines[i].label.as_str())).collect();
@@ -712,8 +764,33 @@ impl Room {
             }
         }
 
+        if let Some((index, fan)) = editing {
+            if let Some(tower) = layout.parts.iter().find(|p| p.model == Model::Tower && layout.devices[p.device].index == index)
+            {
+                if let Some(at) = home.visible(layout.part_center(tower) + mesh::y60::fan_center(fan)) {
+                    let label = crate::rgb::NAMES[fan];
+                    let width = ui.measure(g, label, 11.0, true) + 18.0;
+                    g.round_rect_stroke(at.x - 7.0, at.y - 7.0, 14.0, 14.0, 7.0, 1.5, [254, 211, 150, 245]);
+                    g.rect(at.x + 7.0, at.y - 0.75, 10.0, 1.5, [254, 211, 150, 245]);
+                    g.round_rect_fill(at.x + 16.0, at.y - 10.0, width, 20.0, 4.0, [26, 34, 38, 238]);
+                    ui.draw(g, at.x + 25.0, at.y - 5.6, label, 11.0, [254, 211, 150, 255], true);
+                }
+            }
+        }
         ui.draw(g, PAD, 22.0, "KasaDesk", 20.0, fade(TEXT, calm), true);
-        ui.draw(g, PAD, 50.0, "화면을 볼 기기를 눌러 주세요", 13.0, fade(MUTE, calm), false);
+        ui.draw(
+            g,
+            PAD,
+            50.0,
+            if editing.is_some() {
+                "팬을 눌러 조명을 조정하세요"
+            } else {
+                "화면을 볼 기기를 눌러 주세요"
+            },
+            13.0,
+            fade(MUTE, calm),
+            false,
+        );
         if machines.is_empty() {
             let text = if app_alive { "카사텀 명부에 기기를 추가하세요" } else { "카사텀을 띄우거나 로그인하면 기기가 보여요" };
             let desk = home.project(vec3((layout.plan.desk.0 + layout.plan.desk.1) / 2.0, mesh::DESK_Y + 3.0, 0.0));
@@ -731,7 +808,12 @@ impl Room {
             let pw = ui.measure(g, &pages, 12.0, false);
             ui.draw(g, width * 0.5 - pw / 2.0, left.1 + 7.0, &pages, 12.0, MUTE, false);
         }
-        let hint = "WASD 이동 · 휠 앞뒤 · 우클릭 드래그 시선 · Home 복귀";
+        let hint = if editing.is_some() {
+            "팬 선택 · Tab 이동 · Esc 닫기"
+        } else {
+            "WASD 이동 · 휠 앞뒤 · 우클릭 드래그 시선 · Home 복귀"
+        };
+        let foot = editing.map_or(foot, |(i, _)| machines[i].label.as_str());
         let hint_width = ui.measure(g, hint, 12.0, false);
         let show_hint = !machines.is_empty() && width >= 680.0;
         let foot_width = width - PAD * 2.0 - if show_hint { hint_width + 24.0 } else { 0.0 };
@@ -754,7 +836,8 @@ impl Room {
         let arrived = dive.and_then(|(i, _, p)| (p >= 1.0 && self.dive.as_ref().is_some_and(|d| !d.out)).then_some(i));
         let gpu = &mut self.gpu;
         let result = g.render_with_underlay(0.0, true, |device, queue, encoder, texture, target, format| {
-            gpu.get_or_insert_with(|| gpu::RoomGpu::new(device, queue, format)).draw(device, queue, encoder, texture, target, layout, &frame, preview);
+            gpu.get_or_insert_with(|| gpu::RoomGpu::new(device, queue, format))
+                .draw(device, queue, encoder, texture, target, layout, &frame, preview, rgb);
         });
         self.tags = tags;
         if self.keyboard.is_none() && self.dive.is_none() && self.dragging.is_none() {

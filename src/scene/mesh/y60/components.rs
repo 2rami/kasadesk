@@ -155,7 +155,7 @@ fn uni_fan() -> Mesh {
         for i in 0..9 {
             let [a, b] = row(i);
             let [c, d] = row(i + 1);
-            m.quad([a, c, d, b], gradient([177, 208, 215], [218, 230, 240], i as f32 / 8.0), mat::SOLID);
+            m.quad([a, c, d, b], gradient([177, 208, 215], [218, 230, 240], i as f32 / 8.0), mat::DIFFUSER);
         }
     }
     cylindrical_side(&mut m, vec3(0.0, 0.0, -20.0), Vec3::ZERO, 18.2, ALUMINIUM);
@@ -173,19 +173,31 @@ fn uni_fan() -> Mesh {
     m
 }
 
+pub(super) const FANS: [(Vec3, Vec3); 6] = [
+    (vec3(-131.0, 360.0, 40.0), Vec3::NEG_Y),
+    (vec3(-11.0, 360.0, 40.0), Vec3::NEG_Y),
+    (vec3(109.0, 360.0, 40.0), Vec3::NEG_Y),
+    (vec3(-195.0, 302.0, 29.0), Vec3::X),
+    (vec3(141.0, 280.0, 8.0), Vec3::Z),
+    (vec3(141.0, 160.0, 8.0), Vec3::Z),
+];
+
 pub(super) fn installed_fans(m: &mut Mesh) {
     let fan = uni_fan();
-    let mut install = |pos, normal| {
+    for (index, (pos, normal)) in FANS.into_iter().enumerate() {
         let (u, v) = axes(normal);
+        let start = m.vertices.len();
         placed(m, &fan, pos, Mat3::from_cols(u, v, normal));
-    };
-    for x in [-131.0, -11.0, 109.0] {
-        install(vec3(x, 360.0, 40.0), Vec3::NEG_Y);
+        for (vertex, local) in m.vertices[start..].iter_mut().zip(&fan.vertices) {
+            if vertex.material[3] == mat::DIFFUSER {
+                vertex.material[3] = 17.0 + (2 * index) as f32;
+                vertex.uv[0] = 1.0;
+            } else if vertex.material[3] == mat::RGB {
+                let outer = local.point[0].hypot(local.point[1]) > 20.0;
+                vertex.material[3] = 17.0 + (2 * index + usize::from(outer)) as f32;
+            }
+        }
     }
-    for y in [160.0, 280.0] {
-        install(vec3(141.0, y, 8.0), Vec3::Z);
-    }
-    install(vec3(-195.0, 302.0, 29.0), Vec3::X);
 }
 
 fn perforations(m: &mut Mesh, corner: Vec3, rows: usize, columns: usize, pitch: f32) {
@@ -334,6 +346,12 @@ pub(super) fn kraken_elite(m: &mut Mesh) {
         m.quad([arc(i, 25.0), arc(i, 27.2), arc(i + 1, 27.2), arc(i + 1, 25.0)], gradient(ICE, LILAC, i as f32 / 47.0), mat::RGB);
     }
     text(m, "NZXT", lcd + vec3(-14.4, -3.6, 0.3), 8.0, [235, 242, 249]);
+    let first = m.vertices.len();
+    let screen = lcd + Vec3::Z * 0.55;
+    annulus(m, screen, Vec3::Z, 30.0, 0.0, WHITE, 29.0);
+    for v in &mut m.vertices[first..] {
+        v.uv = [0.5 + (v.point[0] - screen.x) / 60.0, 0.5 - (v.point[1] - screen.y) / 60.0];
+    }
     for i in 0..2 {
         let d = i as f32;
         let start = base + vec3(39.0, 8.0 - 15.0 * d, 25.0);

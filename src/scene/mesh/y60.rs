@@ -182,6 +182,31 @@ fn panels(m: &mut Mesh) {
     slot(m, 34.0, 2.1, 4.4, SEAL);
 }
 
+const CASE_YAW: f32 = -0.68;
+
+pub(in crate::scene) fn fan_center(index: usize) -> Vec3 {
+    Quat::from_rotation_y(CASE_YAW) * components::FANS[index].0 / 127.0
+}
+
+pub(in crate::scene) fn fan_hit(origin: Vec3, direction: Vec3) -> Option<usize> {
+    let inverse = Quat::from_rotation_y(-CASE_YAW);
+    let origin = (inverse * origin) * 127.0;
+    let dir = inverse * direction;
+    components::FANS
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &(center, normal))| {
+            let dot = dir.dot(normal);
+            if dot >= -0.015 {
+                return None;
+            }
+            let t = (center - origin).dot(normal) / dot;
+            (t >= 0.0 && (origin + t * dir - center).length_squared() <= 58.0 * 58.0).then_some((i, t))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
 /// The three panes are the final triangles so the renderer can blend them after all opaque surfaces.
 pub(in crate::scene) fn geometry() -> Geometry {
     let mut m = Mesh::default();
@@ -199,7 +224,7 @@ pub(in crate::scene) fn geometry() -> Geometry {
         let gap = (lower[j] - lower[i]).normalize() * 0.65;
         m.quad([lower[i] + gap, lower[j] - gap, upper[j] - gap, upper[i] + gap], SILVER, mat::GLASS);
     }
-    let turn = Quat::from_rotation_y(-0.68);
+    let turn = Quat::from_rotation_y(CASE_YAW);
     let mut lo = Vec3::splat(f32::MAX);
     let mut hi = Vec3::splat(f32::MIN);
     for v in &mut m.vertices {
@@ -216,5 +241,18 @@ pub(in crate::scene) fn geometry() -> Geometry {
         center: (hi + lo) * 0.5,
         half: (hi - lo) * 0.5,
         screen: None,
+    }
+}
+
+#[cfg(test)]
+mod rgb_tests {
+    use super::*;
+    #[test]
+    fn all_six_mounted_fans_can_be_picked_from_their_faces() {
+        let turn = Quat::from_rotation_y(CASE_YAW);
+        for (index, (_, normal)) in components::FANS.iter().enumerate() {
+            let n = turn * *normal;
+            assert_eq!(fan_hit(fan_center(index) + n * 0.12, -n), Some(index));
+        }
     }
 }

@@ -36,6 +36,7 @@ pub enum Ev {
     /// 새 장·상태 — 다시 그린다.
     Wake,
     Preview(WindowId),
+    Rgb(WindowId, u64, crate::rgb::Update),
     /// 그 기기를 연다(None 이면 고르기 창).
     Open(Option<String>),
     Roster { machines: Vec<Machine>, app_alive: bool },
@@ -67,6 +68,7 @@ struct Win {
     closed_since: Option<Instant>,
     cursor: (f32, f32),
     room: Room,
+    rgb: crate::rgb::Panel,
     preview: crate::preview::Preview,
     ui: Ui,
 }
@@ -116,6 +118,7 @@ pub struct Desk {
     session: Arc<Session>,
     state: std::path::PathBuf,
     login: Login,
+    rgb_config: Option<Arc<crate::rgb::Config>>,
     /// 받아 둔 새 판과 그 칩 자리(그린 뒤에 생긴다).
     #[cfg(windows)]
     update: Option<(String, Option<(f32, f32, f32, f32)>)>,
@@ -145,6 +148,7 @@ impl Desk {
             session,
             state,
             login,
+            rgb_config: crate::rgb::Config::load(),
             #[cfg(windows)]
             update: None,
             #[cfg(windows)]
@@ -232,6 +236,7 @@ impl Desk {
         if let Some(w) = self.windows.values_mut().find(|w| w.label.is_none()) {
             w.label = label;
             w.preview = Default::default();
+            w.rgb = Default::default();
             w.room.suspend();
             w.window.set_min_inner_size(None::<LogicalSize<f64>>);
             w.window.set_cursor(CursorIcon::Default);
@@ -262,7 +267,7 @@ impl Desk {
         };
         let mut win = Win {
             gpu, window, label, view: None, display: None, closed_since: None,
-            cursor: (0.0, 0.0), room: Room::default(), preview: Default::default(), ui: Ui::new(),
+            cursor: (0.0, 0.0), room: Room::default(), rgb:Default::default(), preview: Default::default(), ui: Ui::new(),
         };
         if win.label.is_none() {
             win.room.reflow(win.logical(), &self.machines);
@@ -328,12 +333,15 @@ impl Desk {
             #[cfg(windows)]
             let update = &mut self.update;
             let preview = w.room.selected().and_then(|i| Some((i, w.preview.picture(self.machines.get(i)?)?)));
-            w.room.paint(preview.as_ref().map(|(i, p)| (*i, p.as_ref())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, |g, ui, size| {
-                login.paint_chip(g, ui, size.0, cred.as_ref());
+            let index=w.room.rgb_index(&self.machines,self.rgb_config.as_deref());
+            let snap=w.rgb.data.clone();
+            w.room.paint(preview.as_ref().map(|(i, p)| (*i, p.as_ref())), index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.fan_index())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, |g, ui, size| {
+                if !w.rgb.open { login.paint_chip(g, ui, size.0, cred.as_ref()); }
                 #[cfg(windows)]
-                if let Some((version, rect)) = update.as_mut() {
+                if let Some((version, rect)) = update.as_mut().filter(|_|!w.rgb.open) {
                     *rect = Some(paint_update(g, ui, size.0, version));
                 }
+                w.rgb.paint(g,ui,size,index.is_some() && !login.open);
                 login.paint_panel(g, ui, size);
             })
         } else {
@@ -382,13 +390,13 @@ impl Desk {
             }
             if let WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } = event {
                 #[cfg(windows)]
-                if !self.login.open && self.update.as_ref().and_then(|u| u.1).is_some_and(|(x, y, w, h)| {
+                if !self.login.open && !w.rgb.open && self.update.as_ref().and_then(|u| u.1).is_some_and(|(x, y, w, h)| {
                     p.0 >= f64::from(x) && p.0 < f64::from(x + w) && p.1 >= f64::from(y) && p.1 < f64::from(y + h)
                 }) {
                     self.quit_for_update = crate::update::install_now(true);
                     return;
                 }
-                let action = self.login.click(p, self.session.get().is_some());
+                let action = if w.rgb.open { Action::None } else { self.login.click(p, self.session.get().is_some()) };
                 if !matches!(action, Action::None) || self.login.open {
                     w.room.stop_navigation();
                     self.login_action(action);
@@ -398,6 +406,31 @@ impl Desk {
             if self.login.open {
                 w.room.stop_navigation();
                 return;
+            }
+            let rgb_index = w.room.rgb_index(&self.machines, self.rgb_config.as_deref());
+            let left = matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. });
+            if let Some(index) = rgb_index {
+                if left {
+                    let was_open = w.rgb.open;
+                    let touched = w.rgb.click(w.cursor);
+                    if !touched {
+                        if let Some(fan) = w.room.fan_hit(index, w.cursor) {
+                            w.rgb.choose(fan);
+                        } else if was_open {
+                            w.rgb.close();
+                        }
+                    }
+                    if was_open || touched || w.rgb.open {
+                        w.room.rgb_view(w.rgb.open.then_some(index));
+                        w.window.request_redraw();
+                        return;
+                    }
+                }
+                if w.rgb.open || w.rgb.contains(w.cursor) {
+                    let clickable = w.rgb.clickable(w.cursor) || w.room.fan_hit(index, w.cursor).is_some();
+                    w.window.set_cursor(if clickable { CursorIcon::Pointer } else { CursorIcon::Default });
+                    return;
+                }
             }
             let redraw = match event {
                 WindowEvent::CursorMoved { .. } => w.room.pointer(Some(w.cursor)),
@@ -504,10 +537,34 @@ impl Desk {
                     return;
                 }
             }
+            if w.rgb.open && w.label.is_none() {
+                if pressed {
+                    if code == Some(KeyCode::KeyV) && (m.super_key() || m.control_key()) && w.rgb.editing_hex() {
+                        if let Ok(value) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                            w.rgb.paste_hex(&value);
+                        }
+                    } else if let Some(code) = code {
+                        w.rgb.key(code, event.text.as_deref(), m.shift_key());
+                    }
+                    if !w.rgb.open {
+                        w.room.rgb_view(None);
+                    }
+                    w.window.request_redraw();
+                }
+                return;
+            }
             if !pressed || w.label.is_some() || m.super_key() || m.control_key() || m.alt_key() {
                 return;
             }
             if let Some(code) = code {
+                if code == KeyCode::KeyL && !event.repeat {
+                    if let Some(i) = w.room.rgb_index(&self.machines, self.rgb_config.as_deref()) {
+                        w.rgb.choose(0);
+                        w.room.rgb_view(Some(i));
+                        w.window.request_redraw();
+                        return;
+                    }
+                }
                 if w.room.travel_key(code, pressed) { w.window.request_redraw(); return; }
                 self.picker_key(id, code, event.repeat);
             }
@@ -555,6 +612,14 @@ impl Desk {
     fn picker_probe(&mut self, action: PickerAction) {
         let Some((&id, w)) = self.windows.iter().find(|(_, w)| w.label.is_none()) else { return };
         let (x, y, click) = match action {
+            PickerAction::HandOff => {
+                self.test.release_picker();
+                return;
+            }
+            PickerAction::Resize(width, height) => {
+                let _ = w.window.request_inner_size(LogicalSize::new(f64::from(width), f64::from(height)));
+                return;
+            }
             PickerAction::Hover(x, y) => (x, y, false),
             PickerAction::Click(x, y) => (x, y, true),
             PickerAction::Travel(code, pressed) => {
@@ -611,6 +676,12 @@ impl ApplicationHandler<Ev> for Desk {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Ev) {
         match event {
+            Ev::Rgb(id, generation, data) => {
+                if let Some(w) = self.windows.get_mut(&id).filter(|w| w.label.is_none()) {
+                    w.rgb.receive(generation, data);
+                    w.window.request_redraw();
+                }
+            }
             Ev::Preview(id) => {
                 if let Some(w) = self.windows.get(&id).filter(|w| w.label.is_none()) { w.window.request_redraw(); }
             }
@@ -797,8 +868,24 @@ impl ApplicationHandler<Ev> for Desk {
             self.open(event_loop, Some(label));
         }
         for (&id, w) in self.windows.iter_mut().filter(|(_, w)| w.label.is_none()) {
+            let has_pc = w.room.rgb_index(&self.machines, self.rgb_config.as_deref()).is_some();
+            if !has_pc || self.login.open {
+                if w.rgb.open {
+                    w.rgb.close();
+                    w.room.rgb_view(None);
+                    w.window.request_redraw();
+                }
+            }
+            let active = has_pc && !self.login.open && (self.focused == Some(id) || self.test.drives_picker());
+            let rgb_proxy = self.proxy.clone();
+            if w.rgb.sync(active, &self.net.handle, self.rgb_config.as_ref(), move |gen, msg| {
+                let _ = rgb_proxy.send_event(Ev::Rgb(id, gen, msg));
+            }) {
+                w.window.request_redraw();
+            }
+            if let Some(at)=w.rgb.retry_at(){schedule(&mut next,at);}
             let target = w.room.selected().filter(|&i| self.live.get(i) == Some(&true)
-                && !self.login.open && (self.focused == Some(id) || self.test.drives_picker()) && w.room.has_screen(i)).and_then(|i| self.machines.get(i));
+                && !w.rgb.open && !self.login.open && (self.focused == Some(id) || self.test.drives_picker()) && w.room.has_screen(i)).and_then(|i| self.machines.get(i));
             let proxy = self.proxy.clone();
             if w.preview.sync(target, &self.net, move || { let _ = proxy.send_event(Ev::Preview(id)); }) { w.window.request_redraw(); }
             if let Some(at) = w.preview.next_wake() { schedule(&mut next, at); }
