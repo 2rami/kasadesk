@@ -1,5 +1,7 @@
 //! Original Y60 Snow White scene model, dimensioned in millimetres from HYTE's product specifications.
 
+mod components;
+
 use super::{mat, Mesh};
 use crate::scene::catalog::Geometry;
 use glam::{vec3, Quat, Vec3};
@@ -100,31 +102,6 @@ fn cylindrical_side(m: &mut Mesh, start: Vec3, end: Vec3, radius: f32, color: Co
     }
 }
 
-fn fan(m: &mut Mesh, center: Vec3, normal: Vec3, radius: f32, led: Color) {
-    let (u, v) = axes(normal);
-    let polar = |angle: f32, r: f32, z: f32| center + u * (r * angle.cos()) + v * (r * angle.sin()) + normal * z;
-    annulus(m, center, normal, radius, 0.0, SEAL, mat::SOLID);
-    for blade in 0..9 {
-        let angle = TAU * blade as f32 / 9.0;
-        for j in 0..6 {
-            let row = |step: usize| {
-                let t = step as f32 / 6.0;
-                let r = radius * (0.25 + t * 0.64);
-                let a = angle + t * t * 0.51;
-                [polar(a, r, 1.4 + t), polar(a + 0.25 + 0.22 * t, r, 3.3 + 4.0 * t)]
-            };
-            let [a, b] = row(j);
-            let [c, d] = row(j + 1);
-            m.quad([a, c, d, b], PORCELAIN, mat::SOLID);
-        }
-    }
-    annulus(m, center + normal * 6.0, normal, radius, radius * 0.93, WHITE, mat::SOLID);
-    annulus(m, center + normal * 6.2, normal, radius * 0.94, radius * 0.904, led, mat::RGB);
-    cylindrical_side(m, center + normal, center + normal * 8.0, radius * 0.255, SILVER);
-    annulus(m, center + normal * 8.05, normal, radius * 0.255, 0.0, WHITE, mat::SOLID);
-    annulus(m, center + normal * 8.1, normal, radius * 0.18, radius * 0.145, led, mat::RGB);
-}
-
 // Carry each ring along the tangent to avoid cracks at the hose bends.
 fn hose(m: &mut Mesh, controls: [Vec3; 4], radius: f32, color: Color) {
     let [a, b, c, d] = controls;
@@ -152,103 +129,6 @@ fn hose(m: &mut Mesh, controls: [Vec3; 4], radius: f32, color: Color) {
         }
         last = next;
     }
-}
-
-fn interior(m: &mut Mesh) {
-    m.part([-57.0, 231.0, -46.0], [292.0, 287.0, 5.0], 4.0, BOARD, mat::SOLID);
-    m.part([-161.0, 274.0, -24.0], [63.0, 150.0, 40.0], 5.0, SILVER, mat::SOLID);
-    for i in 0..10 {
-        m.part([-188.0 + i as f32 * 6.1, 281.0, -2.0], [3.2, 115.0, 4.0], 1.0, ALUMINIUM, mat::SOLID);
-    }
-    for (i, x) in [-1.0, 17.0].into_iter().enumerate() {
-        m.part([x, 271.0, -26.0], [11.0, 116.0, 36.0], 2.2, ALUMINIUM, mat::SOLID);
-        m.part([x, 272.0, -6.0], [7.8, 107.0, 5.0], 2.0, [ICE, LILAC][i], mat::RGB);
-    }
-    m.part([-76.0, 356.0, -27.0], [122.0, 25.0, 29.0], 3.5, ALUMINIUM, mat::SOLID);
-    for i in 0..8 {
-        m.part([-126.0 + i as f32 * 14.0, 346.0, -7.0], [8.0, 25.0, 8.0], 1.5, SILVER, mat::SOLID);
-    }
-    for y in [189.0, 224.0] {
-        m.part([-80.0, y, -37.0], [151.0, 15.0, 10.0], 2.4, PORCELAIN, mat::SOLID);
-        for x in [-148.0, -12.0] {
-            annulus(m, vec3(x, y, -31.8), Vec3::Z, 2.5, 0.0, BOARD, mat::SOLID);
-        }
-    }
-    for x in [-116.0, -36.0] {
-        for y in [238.0, 318.0] {
-            cylindrical_side(m, vec3(x, y, -39.0), vec3(x, y, -10.0), 4.4, ALUMINIUM);
-            annulus(m, vec3(x, y, -9.9), Vec3::Z, 4.4, 0.0, SEAL, mat::SOLID);
-        }
-    }
-    let pump = vec3(-76.0, 278.0, -5.0);
-    cylindrical_side(m, pump - Vec3::Z * 22.0, pump + Vec3::Z * 27.0, 38.0, WHITE);
-    annulus(m, pump + Vec3::Z * 27.1, Vec3::Z, 38.0, 0.0, SEAL, mat::SOLID);
-    annulus(m, pump + Vec3::Z * 27.2, Vec3::Z, 34.0, 32.0, ICE, mat::RGB);
-    annulus(m, pump + Vec3::Z * 27.3, Vec3::Z, 14.0, 12.0, ALUMINIUM, mat::SOLID);
-    for d in [0.0, 15.0] {
-        hose(
-            m,
-            [vec3(-44.0, 284.0 - d, 8.0), vec3(51.0, 266.0 - d, 73.0), vec3(48.0 + d, 369.0, 72.0), vec3(119.0 + d, 400.0, 46.0)],
-            5.2,
-            WHITE,
-        );
-    }
-
-    // The vertical riser puts the cooler face toward the long glass panel.
-    m.part([-57.0, 120.0, 40.0], [306.0, 109.0, 37.0], 5.5, SEAL, mat::SOLID);
-    m.part([-57.0, 121.0, 62.0], [311.0, 113.0, 15.0], 6.0, WHITE, mat::SOLID);
-    for (x, go_right) in [(-183.0, 1.0), (69.0, -1.0)] {
-        for i in 0..3 {
-            let start = x + go_right * i as f32 * 8.0;
-            m.quad(
-                [
-                    vec3(start, 172.5, 69.6),
-                    vec3(start + go_right * 19.0, 155.0, 69.6),
-                    vec3(start + go_right * 22.5, 155.0, 69.6),
-                    vec3(start + go_right * 3.5, 172.5, 69.6),
-                ],
-                ALUMINIUM,
-                mat::SOLID,
-            );
-        }
-    }
-    m.part([-97.0, 176.2, 57.0], [139.0, 2.4, 6.0], 1.0, ICE, mat::RGB);
-    for x in [-204.0, -107.0, -7.0, 89.0] {
-        for y in [72.0, 169.0] {
-            annulus(m, vec3(x, y, 69.7), Vec3::Z, 1.85, 0.0, BOARD, mat::SOLID);
-        }
-    }
-    for x in [-157.0, -57.0, 43.0] {
-        fan(m, vec3(x, 119.0, 70.0), Vec3::Z, 46.0, ICE);
-    }
-    for j in 0..32 {
-        m.part([-201.0 + j as f32 * 9.1, 176.0, 40.0], [2.7, 6.0, 32.0], 0.8, SILVER, mat::SOLID);
-    }
-    for i in 0..5 {
-        let x = 60.0 + i as f32 * 3.8;
-        hose(
-            m,
-            [
-                vec3(x, 178.0, 38.0),
-                vec3(x + 40.0, 221.0, 36.0),
-                vec3(108.0, 210.0, -24.0),
-                vec3(101.0, 227.0 + i as f32 * 2.6, -47.0),
-            ],
-            1.8,
-            SEAL,
-        );
-    }
-    m.part([141.0, 237.0, -34.0], [121.0, 245.0, 23.0], 3.5, PORCELAIN, mat::SOLID);
-    for (i, y) in [176.0, 297.0].into_iter().enumerate() {
-        fan(m, vec3(141.0, y, -21.5), Vec3::Z, 56.0, [ICE, LILAC][i]);
-    }
-    m.part([-11.0, 400.0, 44.0], [366.0, 22.0, 125.0], 3.0, SEAL, mat::SOLID);
-    for x in [-132.0, -11.0, 110.0] {
-        m.part([x, 381.7, 44.0], [119.0, 15.0, 119.0], 3.0, WHITE, mat::SOLID);
-        fan(m, vec3(x, 373.5, 44.0), Vec3::NEG_Y, 55.0, LILAC);
-    }
-    m.part([-210.0, 320.0, 29.0], [18.0, 120.0, 120.0], 3.0, PORCELAIN, mat::SOLID);
-    fan(m, vec3(-200.5, 320.0, 29.0), Vec3::X, 55.0, ICE);
 }
 
 fn panels(m: &mut Mesh) {
@@ -306,7 +186,11 @@ fn panels(m: &mut Mesh) {
 pub(in crate::scene) fn geometry() -> Geometry {
     let mut m = Mesh::default();
     panels(&mut m);
-    interior(&mut m);
+    components::n7_z790(&mut m);
+    components::trident_z5(&mut m);
+    components::kraken_elite(&mut m);
+    components::neptune(&mut m);
+    components::installed_fans(&mut m);
     let opaque_count = m.vertices.len();
     let lower = outline(0.0, 58.5);
     let upper = outline(0.0, 399.0);

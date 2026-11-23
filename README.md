@@ -37,7 +37,10 @@ Windows에서 `%LOCALAPPDATA%/KasaDesk/Models`예요. `KASADESK_MODEL_DIR`을 �
 앱은 기기가 보고한 모델 식별자로 제품을 찾아요. 조립 PC처럼 식별자만으로 제품을 알 수 없으면 모델 폴더의
 `bindings.json`에 카사넷 기기 ID 또는 명부 이름으로 연결할 수 있어요. 예를 들어 아래 설정은 한 PC에 Dell 모니터와 HYTE 케이스를 연결해요.
 `hyte-y60`은 제조사 치수와 제품 사진을 참고해 KasaDesk에서 직접 만든 Snow White 모형이에요. 유리 세 면을 통해 보이는
-그래픽카드·메모리·수랭 부품은 예시 조립 구성이에요. 이 케이스는 앱에 내장돼 있어요. [HYTE 제품 사양](https://hyte.com/en-GB/store/y60/cs-hyte-y60-ww)
+부품도 직접 모델링했어요. NZXT N7 Z790에 G.SKILL Trident Z5 RGB 두 개를 꽂고, Kraken Elite 360 RGB White(2023)의
+원형 LCD와 상단 360mm 라디에이터를 연결했어요. 수직으로 세운 Colorful iGame RTX 4070 Ti Neptune은 측면 240mm 라디에이터를 써요.
+화이트 UNI FAN SL-INF 120은 상단 세 개, 측면 두 개, 후면 한 개예요. 호스 경로와 조명색은 장면에 맞춘 구성이에요.
+[HYTE Y60](https://hyte.com/en-GB/store/y60/cs-hyte-y60-ww) · [N7 Z790](https://support.nzxt.com/hc/en-us/articles/37693799549211-N7-Z790-Specs) · [Kraken Elite](https://support.nzxt.com/hc/en-us/articles/47357851031579-Kraken-Elite-2023-Specs) · [Neptune](https://www.colorful.cn/home/product?id=2009&mid=102) · [SL-INF](https://lian-li.com/product/uni-fan-sl-infinity/)
 
 다른 모형이 준비되기 전에도 이름표로 기기에 들어갈 수 있어요.
 
