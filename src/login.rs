@@ -10,13 +10,9 @@ use winit::keyboard::{Key, NamedKey};
 use crate::account::{Credential, Ticket};
 use crate::text::Ui;
 
-const TEXT: [u8; 4] = [236, 240, 246, 255];
-const MUTE: [u8; 4] = [150, 160, 175, 255];
-const ACCENT: [u8; 4] = [86, 132, 245, 255];
-const CHIP: [u8; 4] = [30, 45, 64, 255];
-const CARD: [u8; 4] = [16, 26, 40, 250];
-const FIELD: [u8; 4] = [10, 18, 30, 255];
-const EDGE: [u8; 4] = [64, 83, 108, 255];
+use crate::theme::{CLOUD as TEXT, EDGE, INK as CARD, MIST as MUTE, SUN, SURFACE as CHIP};
+const ACCENT: [u8; 4] = [41, 93, 142, 255];
+const FIELD: [u8; 4] = [15, 32, 54, 255];
 const WARN: [u8; 4] = [242, 132, 120, 255];
 const PAD: f32 = 28.0;
 const ROW: f32 = 36.0;
@@ -80,8 +76,9 @@ impl Login {
         };
         let w = ui.measure(g, &text, 12.0, false) + 24.0;
         let r = (width - PAD - w, 24.0, w, 28.0);
-        g.round_rect_fill(r.0, r.1, r.2, r.3, 6.0, if cred.is_some() { CHIP } else { ACCENT });
-        ui.draw(g, r.0 + 12.0, r.1 + 7.0, &text, 12.0, TEXT, false);
+        g.round_rect_fill(r.0, r.1, r.2, r.3, 14.0, CARD);
+        g.round_rect_stroke(r.0,r.1,r.2,r.3,14.0,1.0,EDGE);
+        ui.draw(g, r.0 + 12.0, r.1 + 7.0, &text, 12.0, if cred.is_some() { TEXT } else { SUN }, true);
         self.hits.push((r, Hit::Chip));
     }
 
@@ -92,14 +89,16 @@ impl Login {
         }
         self.hits.retain(|(_, hit)| *hit == Hit::Chip);
         g.rect(0.0, 0.0, w, h, [0, 0, 0, 150]);
-        let inner = CARD_W - PAD * 2.0;
+        let card_w = CARD_W.min((w - 16.0).max(1.0));
+        let inner = card_w - PAD * 2.0;
         let choose = self.choose.clone();
         let signup = choose.as_ref().is_some_and(|t| t.signup);
         let rows = if choose.is_some() { f32::from(u8::from(signup)) } else { self.providers.len() as f32 };
         let card_h = 84.0 + rows * (ROW + 10.0) + if rows > 0.0 { 26.0 } else { 0.0 } + (ROW + 10.0) * 3.0 + if self.error.is_some() { 30.0 } else { 14.0 };
-        let (cx, cy) = (((w - CARD_W) / 2.0).max(8.0), ((h - card_h) / 2.0).max(8.0));
-        g.round_rect_fill(cx, cy, CARD_W, card_h, 12.0, CARD);
-        g.round_rect_stroke(cx, cy, CARD_W, card_h, 12.0, 1.0, EDGE);
+        let (cx, cy) = (((w - card_w) / 2.0).max(8.0), ((h - card_h) / 2.0).max(8.0));
+        g.round_rect_fill(cx, cy, card_w, card_h, 12.0, CARD);
+        g.round_rect_stroke(cx, cy, card_w, card_h, 12.0, 1.0, EDGE);
+        g.rect(cx + PAD, cy + 1.0, inner * 0.22, 2.0, SUN);
         let (title, lead) = match &choose {
             Some(t) => (
                 format!("{} 로 처음 왔어요", provider_name(&t.provider)),
@@ -109,7 +108,7 @@ impl Login {
         };
         ui.draw(g, cx + PAD, cy + 24.0, &title, 18.0, TEXT, true);
         ui.draw(g, cx + PAD, cy + 52.0, &lead, 11.0, MUTE, false);
-        let close = (cx + CARD_W - 40.0, cy + 16.0, 28.0, 28.0);
+        let close = (cx + card_w - 40.0, cy + 16.0, 28.0, 28.0);
         ui.draw(g, close.0 + 9.0, close.1 + 5.0, "×", 16.0, MUTE, false);
         self.hits.push((close, Hit::Close));
         let mut y = cy + 84.0;

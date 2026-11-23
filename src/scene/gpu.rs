@@ -16,7 +16,7 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Instance {
     position: [f32; 3],
-    lift: f32,
+    highlight: f32,
     glow: f32,
     preview: f32,
     rgb: f32,
@@ -48,6 +48,7 @@ pub struct RoomGpu {
     solid: wgpu::RenderPipeline,
     glaze: wgpu::RenderPipeline,
     shadows: wgpu::RenderPipeline,
+    shadow_parts: Vec<(usize, [f32; 3])>,
     shadow_depth: wgpu::TextureView,
     shadow_binding: wgpu::BindGroup,
     scene: wgpu::Buffer,
@@ -73,12 +74,12 @@ impl RoomGpu {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("KasaDesk room shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("room.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("showers.wgsl"), "\n", include_str!("room.wgsl")).into()),
         });
-        let plate = image::load_from_memory_with_format(include_bytes!("../../assets/orbit.jpg"), image::ImageFormat::Jpeg)
-            .expect("embedded orbital panorama").into_rgba8();
+        let plate = image::load_from_memory_with_format(include_bytes!("../../assets/river-sunshower.jpg"), image::ImageFormat::Jpeg)
+            .expect("embedded riverside panorama").into_rgba8();
         let texture = device.create_texture_with_data(queue, &wgpu::TextureDescriptor {
-            label: Some("KasaDesk orbital horizon"),
+            label: Some("KasaDesk riverside horizon"),
             size: wgpu::Extent3d { width: plate.width(), height: plate.height(), depth_or_array_layers: 1 },
             mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
@@ -272,6 +273,7 @@ impl RoomGpu {
             solid,
             glaze,
             shadows,
+            shadow_parts: Vec::new(),
             shadow_depth,
             shadow_binding,
             scene,
@@ -315,7 +317,8 @@ impl RoomGpu {
             });
             self.depth = Some((size, depth.create_view(&Default::default())));
         }
-        if self.room.as_ref().is_none_or(|(plan, _, _)| *plan != layout.plan) {
+        let new_room = self.room.as_ref().is_none_or(|(plan, _, _)| *plan != layout.plan);
+        if new_room {
             let vertices = mesh::room_vertices(&layout.plan);
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("KasaDesk room meshes"),
@@ -363,19 +366,18 @@ impl RoomGpu {
             sun_clip: sun_clip.to_cols_array_2d(),
             eye: frame.eye.extend(0.0).to_array(),
             camera: frame.camera.extend(1.0).to_array(),
-            lighting: [frame.day, frame.dusk, frame.indoor, 0.0],
+            lighting: [frame.day, frame.dusk, frame.indoor, frame.rain_time],
             viewport: [size.width as f32, size.height as f32, preview_size.0 as f32, preview_size.1 as f32],
             preview_rect, fan_colors:rgb.map_or([[0.0;4];12],|(_,s)|s.lights()),
-            bench: [left, right, mesh::DESK_Y, 0.0],
+            bench: [left, right, mesh::DESK_Y, layout.plan.limits().0.z],
         }));
         // 방 한 칸 + 모형 종류마다 줄 세운 기기 자리.
-        let mut data = vec![Instance { position: [0.0; 3], lift: 0.0, glow: 0.0, preview: 0.0, rgb: 0.0 }];
+        let mut data = vec![Instance { position: [0.0; 3], highlight: 0.0, glow: 0.0, preview: 0.0, rgb: 0.0 }];
         let mut ranges = Vec::new();
         for index in 0..self.ranges.len() {
             let start = data.len() as u32;
             for (part, device) in layout.parts.iter().filter(|p| p.asset == Some(index)).map(|p| (p, &layout.devices[p.device])) {
-                let lift = if part.lifts { device.lift } else { 0.0 };
-                data.push(Instance { position: part.position.to_array(), lift, glow: device.glow,
+                data.push(Instance { position: part.position.to_array(), highlight: device.highlight, glow: device.glow,
                     rgb:rgb.filter(|(i,_)|*i==device.index && part.model==mesh::Model::Tower).map_or(0.0,|(_,s)|if s.lcd.is_some(){2.0}else{1.0}),
                     preview: f32::from(part.main && preview_size.0 != 0 && preview.is_some_and(|(i,_)| i == device.index)) });
             }
@@ -393,7 +395,11 @@ impl RoomGpu {
         }
         let (Some((_, instances)), Some((_, vertices, room_count)), Some((_, depth))) = (&self.instances, &self.room, &self.depth) else { return };
         queue.write_buffer(instances, 0, bytemuck::cast_slice(&data));
-        {
+        // Only placement changes the shadow silhouette. Rain and selection animate independently.
+        let placements = || layout.parts.iter().filter_map(|p| Some((p.asset?, p.position.to_array())));
+        if new_room || !placements().eq(self.shadow_parts.iter().copied()) {
+            self.shadow_parts.clear();
+            self.shadow_parts.extend(placements());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("KasaDesk sunlight"), color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {

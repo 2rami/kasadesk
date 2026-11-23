@@ -8,13 +8,7 @@ use super::{hex, parse_color, Color, Config, Fan, Session, Snapshot, Update, NAM
 use crate::text::Ui;
 
 type Rect = (f32, f32, f32, f32);
-const INK: [u8; 4] = [17, 26, 33, 251];
-const SURFACE: [u8; 4] = [33, 47, 56, 255];
-const EDGE: [u8; 4] = [70, 91, 98, 255];
-const TEXT: [u8; 4] = [239, 243, 236, 255];
-const MUTED: [u8; 4] = [171, 189, 191, 255];
-const MINT: [u8; 4] = [149, 231, 207, 255];
-const AMBER: [u8; 4] = [238, 182, 120, 255];
+use crate::theme::{CLOUD as TEXT, EDGE, INK, MIST as MUTED, RAIN, SUN as AMBER, SURFACE};
 const LCD: &str = "kasadesk:kraken-lcd";
 const PALETTE: [Color; 8] = [
     [255, 244, 226],
@@ -284,7 +278,7 @@ impl Panel {
     fn hit(&mut self, g: &mut GridRenderer, r: Rect, a: Action) {
         self.hits.push((r, a));
         if self.focus == Some(a) {
-            outline(g, (r.0 - 2.0, r.1 - 2.0, r.2 + 4.0, r.3 + 4.0), 7.0, MINT)
+            outline(g, (r.0 - 2.0, r.1 - 2.0, r.2 + 4.0, r.3 + 4.0), 7.0, RAIN)
         }
     }
     pub fn paint(&mut self, g: &mut GridRenderer, ui: &mut Ui, size: (f32, f32), available: bool) {
@@ -301,7 +295,7 @@ impl Panel {
                 g,
                 (r.0 + 10.0, r.1 + 12.0, 8.0, 8.0),
                 4.0,
-                if self.data.as_ref().is_some_and(|s| s.connected) { MINT } else { MUTED },
+                if self.data.as_ref().is_some_and(|s| s.connected) { RAIN } else { MUTED },
             );
             ui.draw(g, r.0 + 25.0, r.1 + 9.0, "조명 · LCD", 13.0, TEXT, true);
             self.hit(g, r, Action::Open);
@@ -320,7 +314,8 @@ impl Panel {
         let pad = if compact { 13.0 } else { 20.0 };
         let l = x + pad;
         let iw = w - 2.0 * pad;
-        g.rect(l, y, 48.0, 2.0, AMBER);
+        g.round_rect_fill(l, y + 1.0, iw, 2.0, 1.0, EDGE);
+        g.rect(l, y + 1.0, iw * 0.22, 2.0, AMBER);
         ui.draw(g, l, y + if compact { 9.0 } else { 18.0 }, "Y60", if compact { 22.0 } else { 29.0 }, TEXT, true);
         ui.draw(
             g,
@@ -340,16 +335,17 @@ impl Panel {
             (None, Some(_)) => "연결 끊김",
             _ => "연결 중",
         };
-        let stat_col = if self.data.as_ref().is_some_and(|s| s.connected) { MINT } else { AMBER };
+        let stat_col = if self.data.as_ref().is_some_and(|s| s.connected) { RAIN } else { AMBER };
         fill(g, (close.0 - 65.0, close.1 + 10.0, 6.0, 6.0), 3.0, stat_col);
         ui.draw(g, close.0 - 53.0, close.1 + 6.0, status, 10.5, stat_col, true);
         let tab_y = y + if compact { 36.0 } else { 65.0 };
         let tab_h = if compact { 25.0 } else { 33.0 };
-        fill(g, (l, tab_y, iw, tab_h), 6.0, [10, 17, 22, 255]);
+        fill(g, (l, tab_y, iw, tab_h), 6.0, [13, 30, 52, 255]);
         for (i, (label, a)) in [("팬 조명", Action::Light), ("냉각 · LCD", Action::Cooling)].into_iter().enumerate() {
             let tab = (l + 2.0 + i as f32 * iw / 2.0, tab_y + 2.0, iw / 2.0 - 4.0, tab_h - 4.0);
             if self.cooling == (i == 1) {
                 fill(g, tab, 5.0, SURFACE);
+                g.rect(tab.0 + 10.0, tab.1 + tab.3 - 2.0, tab.2 - 20.0, 2.0, RAIN);
             }
             center(g, ui, tab, label, 12.5, if self.cooling == (i == 1) { TEXT } else { MUTED }, true);
             self.hit(g, tab, a);
@@ -370,7 +366,7 @@ impl Panel {
             let selected = i == self.fan;
             fill(g, r, 6.0, if selected { [43, 66, 66, 255] } else { SURFACE });
             if selected {
-                outline(g, r, 6.0, MINT)
+                outline(g, r, 6.0, RAIN)
             }
             let f = self.data.as_ref().map_or_else(Fan::default, |s| s.fans[i]);
             let d = if compact { 16.0 } else { 23.0 };
@@ -410,14 +406,14 @@ impl Panel {
         let ch = if compact { 28.0 } else { 36.0 };
         let field = (x, cy, w * 0.50 - 4.0, ch);
         fill(g, field, 6.0, [11, 18, 22, 255]);
-        outline(g, field, 6.0, if self.typing { MINT } else { EDGE });
+        outline(g, field, 6.0, if self.typing { RAIN } else { EDGE });
         let sample = parse_color(&self.draft).unwrap_or([70, 80, 86]);
         fill(g, (x + 9.0, cy + (ch - 14.0) * 0.5, 14.0, 14.0), 4.0, rgba(sample));
         ui.draw(g, x + 30.0, cy + (ch - 13.0) * 0.5, &format!("#{}", self.draft), 13.0, TEXT, true);
         self.hit(g, field, Action::Hex);
         let apply = (x + w * 0.50 + 4.0, cy, w * 0.50 - 4.0, ch);
         let ready = self.ready() && parse_color(&self.draft).is_some();
-        fill(g, apply, 6.0, if ready { MINT } else { SURFACE });
+        fill(g, apply, 6.0, if ready { RAIN } else { SURFACE });
         center(g, ui, apply, if self.pending { "적용 중" } else { "색 적용" }, 13.0, if ready { INK } else { MUTED }, true);
         if ready {
             self.hit(g, apply, Action::Apply);
@@ -448,7 +444,7 @@ impl Panel {
             center(g, ui, lcd, "LCD 대기", 12.0, MUTED, false);
         }
         let tx = x + d + if compact { 23.0 } else { 30.0 };
-        ui.draw(g, tx, y + 6.0, "KRAKEN ELITE 360", 11.0, MINT, true);
+        ui.draw(g, tx, y + 6.0, "KRAKEN ELITE 360", 11.0, RAIN, true);
         ui.draw(g, tx, y + if compact { 24.0 } else { 40.0 }, "냉각수", 12.0, MUTED, false);
         let temp = snapshot.and_then(|s| s.liquid).map_or_else(|| "—".into(), |t| format!("{t:.1}°C"));
         ui.draw(g, tx, y + if compact { 41.0 } else { 63.0 }, &temp, if compact { 23.0 } else { 32.0 }, TEXT, true);

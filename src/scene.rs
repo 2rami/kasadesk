@@ -1,4 +1,4 @@
-//! 궤도 관측실의 조작대에서 기기를 선택하면 카메라가 해당 화면으로 이동한다.
+//! 강변 작업실의 책상에서 기기를 선택하면 카메라가 해당 화면으로 이동한다.
 
 mod catalog;
 mod gpu;
@@ -17,21 +17,16 @@ use mesh::{Model, Plan};
 
 const PAD: f32 = 24.0;
 const BOTTOM: f32 = 52.0;
-const TEXT: [u8; 4] = [244, 238, 228, 255];
-const MUTE: [u8; 4] = [184, 202, 211, 255];
-const WARM: [u8; 4] = [129, 228, 233, 255];
-const TAG: [u8; 4] = [14, 27, 37, 236];
-const LIVE: [u8; 4] = [130, 218, 146, 255];
-const IDLE: [u8; 4] = [138, 155, 164, 255];
+use crate::theme::{CLOUD as TEXT, INK as TAG, MIST as MUTE, RAIN as LIVE, SUN as WARM};
+const IDLE: [u8; 4] = [159, 174, 191, 255];
 /// 다가가며 덮는 색 — 보기 화면 바탕(`desk::BG`)과 같다.
 const FADE: [u8; 3] = [24, 24, 27];
 /// 한 방에 놓는 기기 수 — 넘치면 장을 넘긴다.
 const PAGE: usize = 10;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-/// 시간대에 따른 광량을 갱신할 때만 정지한 장면을 다시 그린다.
+/// 비를 멈춘 창에서도 해질녘 광량은 따라간다.
 const IDLE_TICK: Duration = Duration::from_secs(20);
-const LIFT_TIME: f32 = 0.16;
-const LIFT_HEIGHT: f32 = 0.45;
+const HIGHLIGHT_TIME: f32 = 0.16;
 const DIVE_TIME: f32 = 0.75;
 const FOV_Y: f32 = 0.76;
 const HOME_YAW: f32 = 0.13;
@@ -80,7 +75,7 @@ impl View {
         let projection = Mat4::perspective_rh(FOV_Y, aspect, 0.09, distance + 400.0);
         let clip_from_world = projection * view;
         let (day, dusk, indoor) = gpu::daylight();
-        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), eye, camera: self.target + eye * distance, day, dusk, indoor }
+        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), eye, camera: self.target + eye * distance, day, dusk, indoor, rain_time: 0.0 }
     }
 }
 
@@ -93,6 +88,7 @@ pub struct Frame {
     day: f32,
     dusk: f32,
     indoor: f32,
+    rain_time: f32,
 }
 
 impl Frame {
@@ -144,10 +140,10 @@ impl Ray {
     }
 }
 
-/// 방에 놓인 기기 하나 — 들림(고르면 1)과 화면 빛(길이 서 있으면 1).
+/// 방에 놓인 기기 하나 — 선택 조명과 화면 빛(길이 서 있으면 1).
 struct Device {
     index: usize,
-    lift: f32,
+    highlight: f32,
     glow: f32,
 }
 
@@ -158,7 +154,6 @@ struct Part {
     asset: Option<usize>,
     bounds: Option<(Vec3, Vec3)>,
     position: Vec3,
-    lifts: bool,
     main: bool,
 }
 
@@ -167,7 +162,7 @@ impl Part {
         let library = catalog::library();
         let asset = library.resolve(machine, model);
         let bounds = asset.and_then(|i| library.assets[i].geometry.as_ref()).map(|g| (g.center, g.half));
-        Self { device, model, asset, bounds, position, lifts: model != Model::Tower, main: model != Model::Tower }
+        Self { device, model, asset, bounds, position, main: model != Model::Tower }
     }
 
     fn asset(&self) -> Option<&'static catalog::Asset> {
@@ -224,13 +219,8 @@ impl Layout {
             parts.push(mini);
             parts.push(Part::new(i, &page_machines[i], Model::Monitor, vec3(x - 0.65, mesh::DESK_Y, -0.4)));
         }
-        let devices = (0..page_machines.len()).map(|i| Device { index: first + i, lift: 0.0, glow: 0.0 }).collect();
+        let devices = (0..page_machines.len()).map(|i| Device { index: first + i, highlight: 0.0, glow: 0.0 }).collect();
         Self { window, home: home_view(&plan, window), plan, devices, parts }
-    }
-
-    fn part_center(&self, part: &Part) -> Vec3 {
-        let lift = if part.lifts { self.devices[part.device].lift * LIFT_HEIGHT } else { 0.0 };
-        part.position + Vec3::Y * lift
     }
 
     fn computer_asset(&self, device: usize) -> Option<&'static catalog::Asset> {
@@ -246,15 +236,13 @@ impl Layout {
         self.devices.iter().position(|d| d.index == index)
     }
 
-    fn hit(&self, frame: &Frame, pointer: Point, hovered: Option<usize>) -> Option<usize> {
+    fn hit(&self, frame: &Frame, pointer: Point) -> Option<usize> {
         let ray = frame.ray(pointer)?;
         self.parts.iter().filter_map(|part| {
             let device = &self.devices[part.device];
             let (center, half) = part.bounds?;
-            let center = self.part_center(part) + center;
-            // 들리는 동안에도 처음 자리를 누른 채 있으면 놓치지 않는다.
-            let slack = if hovered == Some(device.index) && part.lifts { Vec3::Y * device.lift * LIFT_HEIGHT } else { Vec3::ZERO };
-            ray.hit_box(center - half - slack, center + half).map(|t| (t, device.index))
+            let center = part.position + center;
+            ray.hit_box(center - half, center + half).map(|t| (t, device.index))
         }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, index)| index)
     }
 
@@ -262,7 +250,7 @@ impl Layout {
     fn anchors(&self, frame: &Frame) -> Vec<(usize, Vec2)> {
         self.devices.iter().enumerate().filter_map(|(d, device)| {
             let part = self.main_part(d)?;
-            Some((device.index, frame.visible(self.part_center(part) + part.top() + Vec3::Y * 0.35)?))
+            Some((device.index, frame.visible(part.position + part.top() + Vec3::Y * 0.35)?))
         }).collect()
     }
 
@@ -278,7 +266,7 @@ impl Layout {
         }
         let aspect = self.window.0 / self.window.1.max(1.0);
         let half = (size.y * 0.5 / 0.62).max(size.x * 0.5 / 0.84 / aspect);
-        Some(View { target: self.part_center(part) + face, yaw, pitch, half })
+        Some(View { target: part.position + face, yaw, pitch, half })
     }
 }
 
@@ -311,6 +299,8 @@ impl Dive {
 pub struct Room {
     layout: Option<Layout>,
     gpu: Option<gpu::RoomGpu>,
+    rain_time: f64,
+    rain_paused: bool,
     pointer: Option<Point>,
     look: Vec2,
     free: Option<View>,
@@ -341,7 +331,7 @@ impl Room {
         if self.dive.as_ref().is_some_and(|d| self.layout.as_ref().and_then(|l| l.device_of(d.index)).is_none()) {
             self.dive = None;
         }
-        self.hovered = self.pointer.and_then(|p| self.hit_at(p, None));
+        self.hovered = self.pointer.and_then(|p| self.hit_at(p));
         self.select(key.or(self.hovered).or(self.dive.as_ref().map(|d| d.index)));
     }
 
@@ -409,14 +399,14 @@ impl Room {
         })
     }
 
-    fn hit_at(&self, p: Point, hovered: Option<usize>) -> Option<usize> {
+    fn hit_at(&self, p: Point) -> Option<usize> {
         if self.dive.is_some() {
             return None;
         }
         if let Some(&(_, index)) = self.tags.iter().find(|(r, _)| contains(*r, p)) {
             return Some(index);
         }
-        self.layout.as_ref()?.hit(&self.home_frame()?, p, hovered)
+        self.layout.as_ref()?.hit(&self.home_frame()?, p)
     }
 
     fn select(&mut self, selected: Option<usize>) -> bool {
@@ -447,7 +437,7 @@ impl Room {
         if self.dive.is_some() {
             return false;
         }
-        self.hovered = point.and_then(|p| self.hit_at(p, self.hovered));
+        self.hovered = point.and_then(|p| self.hit_at(p));
         if point.is_some() {
             self.keyboard = None;
             self.select(self.hovered) || moved
@@ -467,7 +457,7 @@ impl Room {
     }
 
     pub fn hit(&self) -> Option<usize> {
-        self.hit_at(self.pointer?, self.hovered)
+        self.hit_at(self.pointer?)
     }
 
     /// 그 기기로 다가가기 시작한다 — 다 다가가면 `take_arrival` 이 돌려준다.
@@ -559,11 +549,11 @@ impl Room {
         let layout = self.layout.as_ref()?;
         let part = layout.parts.iter().find(|p| p.model == Model::Tower && layout.devices[p.device].index == index)?;
         let frame = self.home_frame()?;
-        if layout.hit(&frame, p, None) != Some(index) {
+        if layout.hit(&frame, p) != Some(index) {
             return None;
         }
         let ray = frame.ray(p)?;
-        mesh::y60::fan_hit(ray.origin - layout.part_center(part), ray.direction)
+        mesh::y60::fan_hit(ray.origin - part.position, ray.direction)
     }
 
     pub fn rgb_view(&mut self, index: Option<usize>) {
@@ -639,16 +629,21 @@ impl Room {
         true
     }
 
-    pub fn next_frame(&self) -> Option<Instant> {
+    pub fn toggle_rain(&mut self) {
+        self.rain_paused = !self.rain_paused;
+    }
+
+    pub fn next_frame(&self, animate_rain: bool) -> Option<Instant> {
         let layout = self.layout.as_ref()?;
         let moving = self.dive.as_ref().is_some_and(|d| self.arrived.is_none() && (d.out || d.progress < 1.0))
             || self.movement.iter().any(|&down| down)
             || (self.free.is_none() && self.dive.is_none() && self.look != Self::look_target(self.pointer, layout.window))
-            || layout.devices.iter().any(|d| d.lift != lift_target(self.selected, d.index));
+            || layout.devices.iter().any(|d| d.highlight != highlight_target(self.selected, d.index));
         if moving {
             return Some(self.animated_at.unwrap_or_else(Instant::now) + FRAME_INTERVAL);
         }
-        self.painted_at.map(|at| at + IDLE_TICK)
+        let tick = if animate_rain && !self.rain_paused { Duration::from_millis(42) } else { IDLE_TICK };
+        self.painted_at.map(|at| at + tick)
     }
 
     fn animate(&mut self, now: Instant) {
@@ -670,10 +665,10 @@ impl Room {
             self.look = self.look.lerp(target, 1.0 - (-elapsed * 12.0).exp());
             if self.look.distance_squared(target) < 1e-5 { self.look = target; }
         }
-        let delta = elapsed / LIFT_TIME;
+        let delta = elapsed / HIGHLIGHT_TIME;
         for device in &mut layout.devices {
-            let target = lift_target(self.selected, device.index);
-            device.lift = if target > device.lift { (device.lift + delta).min(target) } else { (device.lift - delta).max(target) };
+            let target = highlight_target(self.selected, device.index);
+            device.highlight = if target > device.highlight { (device.highlight + delta).min(target) } else { (device.highlight - delta).max(target) };
         }
         if let Some(dive) = &mut self.dive {
             let step = elapsed / DIVE_TIME;
@@ -705,6 +700,9 @@ impl Room {
     ) -> anyhow::Result<usize> {
         let now = Instant::now();
         self.animate(now);
+        if !self.rain_paused {
+            self.rain_time += self.painted_at.map_or(0.0, |at| now.duration_since(at).as_secs_f64().min(0.1));
+        }
         self.painted_at = Some(now);
         let paging = self.paging(machines.len());
         let Some(layout) = &mut self.layout else { return g.render(0.0, true, |_, _, _, _, _, _| {}) };
@@ -716,7 +714,8 @@ impl Room {
         let dive = self.dive.as_ref().map(|d| (d.index, d.eased(), d.progress));
         let home_view = self.free.unwrap_or_else(|| layout.home.with_look(self.look));
         let view = dive.and_then(|(i, t, _)| Some(View::mix(home_view, layout.dive_view(i)?, t))).unwrap_or(home_view);
-        let frame = view.frame(layout.window);
+        let mut frame = view.frame(layout.window);
+        frame.rain_time = self.rain_time as f32;
         let calm = 1.0 - dive.map_or(0.0, |(_, t, _)| smooth(0.0, 0.3, t));
 
         let home = home_view.frame(layout.window);
@@ -728,7 +727,7 @@ impl Room {
             for part in layout.parts.iter().filter(|p| p.model == Model::Tower) {
                 if let Some(asset) = part.asset() {
                     let where_ = if asset.geometry.is_none() { Vec3::Y * 0.5 } else { part.top() };
-                    let Some(at) = home.visible(layout.part_center(part) + where_) else { continue };
+                    let Some(at) = home.visible(part.position + where_) else { continue };
                     anchors.push((layout.devices[part.device].index, at, &asset.name));
                 }
             }
@@ -767,7 +766,7 @@ impl Room {
         if let Some((index, fan)) = editing {
             if let Some(tower) = layout.parts.iter().find(|p| p.model == Model::Tower && layout.devices[p.device].index == index)
             {
-                if let Some(at) = home.visible(layout.part_center(tower) + mesh::y60::fan_center(fan)) {
+                if let Some(at) = home.visible(tower.position + mesh::y60::fan_center(fan)) {
                     let label = crate::rgb::NAMES[fan];
                     let width = ui.measure(g, label, 11.0, true) + 18.0;
                     g.round_rect_stroke(at.x - 7.0, at.y - 7.0, 14.0, 14.0, 7.0, 1.5, [254, 211, 150, 245]);
@@ -777,20 +776,13 @@ impl Room {
                 }
             }
         }
-        ui.draw(g, PAD, 22.0, "KasaDesk", 20.0, fade(TEXT, calm), true);
-        ui.draw(
-            g,
-            PAD,
-            50.0,
-            if editing.is_some() {
-                "팬을 눌러 조명을 조정하세요"
-            } else {
-                "화면을 볼 기기를 눌러 주세요"
-            },
-            13.0,
-            fade(MUTE, calm),
-            false,
-        );
+        let heading = if editing.is_some() { "조명 · 냉각" } else { "여우비 작업실" };
+        let title_w = ui.measure(g, heading, 18.0, true) + 71.0;
+        g.round_rect_fill(PAD, 16.0, title_w, 52.0, 9.0, fade(TAG, calm));
+        crate::theme::sunshower(g, PAD + 12.0, 25.0, calm);
+        g.rect(PAD + 52.0, 25.0, 1.0, 34.0, fade(crate::theme::EDGE, calm));
+        ui.draw(g, PAD + 62.0, 22.0, "KasaDesk", 10.0, fade(LIVE, calm), true);
+        ui.draw(g, PAD + 61.0, 37.0, heading, 18.0, fade(TEXT, calm), true);
         if machines.is_empty() {
             let text = if app_alive { "카사텀 명부에 기기를 추가하세요" } else { "카사텀을 띄우거나 로그인하면 기기가 보여요" };
             let desk = home.project(vec3((layout.plan.desk.0 + layout.plan.desk.1) / 2.0, mesh::DESK_Y + 3.0, 0.0));
@@ -808,24 +800,31 @@ impl Room {
             let pw = ui.measure(g, &pages, 12.0, false);
             ui.draw(g, width * 0.5 - pw / 2.0, left.1 + 7.0, &pages, 12.0, MUTE, false);
         }
-        let hint = if editing.is_some() {
-            "팬 선택 · Tab 이동 · Esc 닫기"
-        } else {
-            "WASD 이동 · 휠 앞뒤 · 우클릭 드래그 시선 · Home 복귀"
-        };
-        let foot = editing.map_or(foot, |(i, _)| machines[i].label.as_str());
-        let hint_width = ui.measure(g, hint, 12.0, false);
-        let show_hint = !machines.is_empty() && width >= 680.0;
-        let foot_width = width - PAD * 2.0 - if show_hint { hint_width + 24.0 } else { 0.0 };
-        let foot = fit(g, ui, foot, 12.0, false, foot_width);
-        let foot_bg = fade(TAG, calm * 0.85);
-        let foot_text_width = ui.measure(g, &foot, 12.0, false);
-        g.round_rect_fill(PAD - 8.0, height - 36.0, foot_text_width + 16.0, 22.0, 5.0, foot_bg);
-        ui.draw(g, PAD, height - 32.0, &foot, 12.0, fade(MUTE, calm), false);
-        if show_hint {
-            g.round_rect_fill(width - PAD - hint_width - 8.0, height - 36.0, hint_width + 16.0, 22.0, 5.0, foot_bg);
-            ui.draw(g, width - PAD - hint_width, height - 32.0, hint, 12.0, fade(MUTE, calm), false);
+        let travel = [("WASD", "이동"), ("휠", "앞뒤"), ("우클릭", "시선"), ("Home", "복귀"),
+            ("R", if self.rain_paused { "비 재생" } else { "비 멈춤" })];
+        let fan_controls = [("클릭", "팬 선택"), ("Tab", "이동"), ("Esc", "닫기")];
+        let controls = if editing.is_some() { fan_controls.as_slice() } else { travel.as_slice() };
+        let mut control_x = width - PAD;
+        let bg = fade(TAG, calm);
+        if !machines.is_empty() && width >= 680.0 {
+            for &(key, action) in controls.iter().rev() {
+                let key_w = ui.measure(g, key, 11.0, true) + 12.0;
+                let action_w = ui.measure(g, action, 11.5, false);
+                let w = key_w + action_w + 17.0;
+                control_x -= w;
+                g.round_rect_fill(control_x,height-39.0,w,25.0,6.0,bg);
+                g.round_rect_fill(control_x+3.0,height-36.0,key_w,19.0,4.0,fade(crate::theme::SURFACE,calm));
+                ui.draw(g,control_x+9.0,height-33.0,key,11.0,fade(LIVE,calm),true);
+                ui.draw(g,control_x+key_w+9.0,height-33.0,action,11.5,fade(TEXT,calm),false);
+                control_x -= 3.0;
+            }
         }
+        let foot = editing.map_or(foot, |(i, _)| machines[i].label.as_str());
+        let foot = fit(g, ui, foot, 12.0, false, control_x - PAD - 34.0);
+        let foot_w = ui.measure(g, &foot, 12.0, false) + 28.0;
+        g.round_rect_fill(PAD,height-39.0,foot_w,25.0,6.0,bg);
+        g.round_rect_fill(PAD+9.0,height-29.0,5.0,5.0,2.5,fade(if app_alive { LIVE } else { WARM },calm));
+        ui.draw(g,PAD+20.0,height-33.0,&foot,12.0,fade(TEXT,calm),false);
         overlay(g, ui, (width, height));
         if let Some((_, _, progress)) = dive {
             let a = smooth(0.62, 1.0, progress);
@@ -841,7 +840,7 @@ impl Room {
         });
         self.tags = tags;
         if self.keyboard.is_none() && self.dive.is_none() && self.dragging.is_none() {
-            self.hovered = self.pointer.and_then(|p| self.hit_at(p, self.hovered));
+            self.hovered = self.pointer.and_then(|p| self.hit_at(p));
             self.select(self.hovered);
         }
         if arrived.is_some() {
@@ -893,6 +892,10 @@ impl Tag<'_> {
             g.round_rect_fill(x - 1.5, y - 1.5, w + 3.0, h + 3.0, 7.0, fade(WARM, alpha));
         }
         g.round_rect_fill(x, y, w, h, 6.0, bg);
+        if !focus { g.round_rect_stroke(x,y,w,h,6.0,1.0,fade(crate::theme::EDGE, alpha)); }
+        if focus {
+            g.round_rect_fill(x + 3.0, y + 8.0, 2.0, h - 16.0, 1.0, fade(WARM, alpha));
+        }
         let line = if focus { 7.0 } else { 5.5 };
         let dot = fade(if self.live { LIVE } else { IDLE }, alpha);
         g.round_rect_fill(x + 12.0, y + line + size * 0.6 - Self::DOT / 2.0, Self::DOT, Self::DOT, Self::DOT / 2.0, dot);
@@ -920,7 +923,7 @@ fn last_page(count: usize) -> usize {
     count.saturating_sub(1) / PAGE
 }
 
-fn lift_target(selected: Option<usize>, index: usize) -> f32 {
+fn highlight_target(selected: Option<usize>, index: usize) -> f32 {
     if selected == Some(index) { 1.0 } else { 0.0 }
 }
 
@@ -976,7 +979,7 @@ mod tests {
 
     fn center(layout: &Layout, frame: &Frame, index: usize) -> Point {
         let part = layout.main_part(layout.device_of(index).unwrap()).unwrap();
-        let p = frame.project(layout.part_center(part) + part.bounds.unwrap_or_else(|| part.model.hull()).0);
+        let p = frame.project(part.position + part.bounds.unwrap_or_else(|| part.model.hull()).0);
         (p.x, p.y)
     }
 
@@ -1013,7 +1016,7 @@ mod tests {
                     let frame = layout.home.with_look(look).frame(window);
                     for i in 0..PAGE {
                         let p = center(&layout, &frame, i);
-                        assert_eq!(layout.hit(&frame, p, None), Some(i), "{kind:?} {window:?} {look:?} {p:?}");
+                        assert_eq!(layout.hit(&frame, p), Some(i), "{kind:?} {window:?} {look:?} {p:?}");
                     }
                 }
             }
@@ -1061,26 +1064,33 @@ mod tests {
         let mut layout = Layout::new((800.0, 600.0), &machines, 0);
         layout.parts[0].bounds = None;
         let frame = layout.home.frame(layout.window);
-        assert_eq!(layout.hit(&frame, center(&layout, &frame, 0), None), None);
+        assert_eq!(layout.hit(&frame, center(&layout, &frame, 0)), None);
         assert_eq!(layout.anchors(&frame).len(), 1);
     }
 
     #[test]
-    fn every_device_can_be_picked_at_rest_and_while_rising() {
+    fn hover_keeps_the_device_pickable_and_its_screen_and_tag_stationary() {
         let devices = mixed(9);
         let mut room = Room::default();
         room.reflow((1280.0, 800.0), &devices);
         attach_fixture_geometry(room.layout.as_mut().unwrap());
         let frame = room.home_frame().unwrap();
+        let layout = room.layout.as_ref().unwrap();
+        let anchors = layout.anchors(&frame);
+        let focus_view = layout.dive_view(8);
         for i in 0..devices.len() {
             let p = center(room.layout.as_ref().unwrap(), &frame, i);
             room.pointer(Some(p));
             assert_eq!(room.hit(), Some(i), "기기 {i} at {p:?}");
         }
-        assert!(room.next_frame().is_some());
+        assert!(room.next_frame(false).is_some());
         settle(&mut room);
+        let layout = room.layout.as_ref().unwrap();
+        assert_eq!(layout.devices[8].highlight, 1.0);
+        assert_eq!(layout.anchors(&frame), anchors);
+        assert_eq!(layout.dive_view(8), focus_view);
         assert_eq!(room.hit(), Some(8));
-        assert!(room.next_frame().is_none());
+        assert!(room.next_frame(false).is_none());
         assert!(room.pointer(None));
         assert!(room.hit().is_none());
     }
@@ -1105,7 +1115,7 @@ mod tests {
         assert_eq!(room.take_arrival(), Some(0));
         assert!(room.dive.is_none() && room.take_arrival().is_none());
         room.surface(0);
-        assert!(room.next_frame().is_some());
+        assert!(room.next_frame(false).is_some());
         settle(&mut room);
         assert!(room.dive.is_none());
     }

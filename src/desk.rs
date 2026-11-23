@@ -67,6 +67,7 @@ struct Win {
     display: Option<u32>,
     closed_since: Option<Instant>,
     cursor: (f32, f32),
+    occluded: bool,
     room: Room,
     rgb: crate::rgb::Panel,
     preview: crate::preview::Preview,
@@ -267,7 +268,8 @@ impl Desk {
         };
         let mut win = Win {
             gpu, window, label, view: None, display: None, closed_since: None,
-            cursor: (0.0, 0.0), room: Room::default(), rgb:Default::default(), preview: Default::default(), ui: Ui::new(),
+            cursor: (0.0, 0.0), occluded: false,
+            room: Room::default(), rgb:Default::default(), preview: Default::default(), ui: Ui::new(),
         };
         if win.label.is_none() {
             win.room.reflow(win.logical(), &self.machines);
@@ -321,14 +323,13 @@ impl Desk {
         w.gpu.clear_chrome();
         self.test.capture(&mut w.gpu);
         let result = if w.label.is_none() {
-            let id = self.net.id().fmt_short();
             let origin = match (self.app_alive, self.session.get().is_some()) {
-                (true, true) => "카사텀과 계정에서 기기를 받는 중",
-                (true, false) => "카사텀에서 명부를 받는 중",
-                (false, true) => "계정으로 기기를 받는 중",
-                (false, false) => "카사텀이 꺼져 있어 지난 명부로 보여요 — 로그인하면 계정 기기도 보여요",
+                (true, true) => "카사텀 · 계정 명부",
+                (true, false) => "카사텀 명부",
+                (false, true) => "계정 명부",
+                (false, false) => "저장된 명부",
             };
-            let foot = format!("보기 앱 {id} · {origin}");
+            let foot = format!("기기 {}대  ·  {origin}", self.machines.len());
             let (login, cred) = (&mut self.login, self.session.get());
             #[cfg(windows)]
             let update = &mut self.update;
@@ -587,7 +588,10 @@ impl Desk {
 
     fn picker_key(&mut self, id: WindowId, code: KeyCode, repeat: bool) {
         let Some(w) = self.windows.get_mut(&id).filter(|w| w.label.is_none()) else { return };
-        if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+        if code == KeyCode::KeyR && !repeat {
+            w.room.toggle_rain();
+            w.window.request_redraw();
+        } else if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
             if !repeat {
                 if let Some(index) = w.room.selected() {
                     if w.room.dive(index) {
@@ -613,6 +617,13 @@ impl Desk {
     fn picker_probe(&mut self, action: PickerAction) {
         let Some((&id, w)) = self.windows.iter().find(|(_, w)| w.label.is_none()) else { return };
         let (x, y, click) = match action {
+            PickerAction::Snapshot(path) => {
+                if let Some(w) = self.windows.get_mut(&id) {
+                    w.gpu.capture_next = Some(path.to_string_lossy().into_owned());
+                    w.window.request_redraw();
+                }
+                return;
+            }
             PickerAction::HandOff => {
                 self.test.release_picker();
                 return;
@@ -785,6 +796,12 @@ impl ApplicationHandler<Ev> for Desk {
                     w.window.request_redraw();
                 }
             }
+            WindowEvent::Occluded(hidden) => {
+                if let Some(w) = self.windows.get_mut(&id) {
+                    w.occluded = *hidden;
+                    if !hidden { w.window.request_redraw(); }
+                }
+            }
             WindowEvent::Focused(f) => {
                 // 창을 오가는 사이 조합키(⌘Tab 의 ⌘)를 뗀 것은 이 창에 안 온다 — 들고 있던 값을 버린다. 안 버리면 돌아와 누르는
                 // 클릭·글자가 그 기기에 Alt 등이 눌린 채로 가서 조작이 먹통처럼 보인다.
@@ -887,7 +904,8 @@ impl ApplicationHandler<Ev> for Desk {
             let proxy = self.proxy.clone();
             if w.preview.sync(target, &self.net, move || { let _ = proxy.send_event(Ev::Preview(id)); }) { w.window.request_redraw(); }
             if let Some(at) = w.preview.next_wake() { schedule(&mut next, at); }
-            if let Some(at) = w.room.next_frame() {
+            let weather = !w.occluded && !w.rgb.open && !self.login.open && (self.focused == Some(id) || self.test.drives_picker());
+            if let Some(at) = w.room.next_frame(weather) {
                 if at <= now {
                     w.window.request_redraw();
                 } else {

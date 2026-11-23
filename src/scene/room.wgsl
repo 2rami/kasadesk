@@ -31,7 +31,7 @@ fn project_sky(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(vertices[i], 1.0, 1.0);
 }
 
-fn orbit(uv: vec2<f32>) -> vec3<f32> {
+fn river_sky(uv: vec2<f32>) -> vec3<f32> {
     return textureSampleLevel(panorama, linear_sampler, uv, 0.0).rgb;
 }
 
@@ -51,10 +51,30 @@ fn horizon(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
     let xy = vec2<f32>(dot(ray,default_right)/aspect_ratio, -dot(ray,cross(default_eye,default_right)));
     let coord = 0.5 + xy / (0.799 * max(depth,0.01)) * cover * 0.96;
     let edge = min(coord,1.0-coord);
-    let inside = smoothstep(-0.08,0.02,min(edge.x,edge.y)) * smoothstep(0.0,0.2,depth);
-    let photo = mix(vec3<f32>(0.017,0.036,0.061), orbit(clamp(coord,vec2<f32>(0.0),vec2<f32>(1.0))),inside);
-    let night = vec3<f32>(0.60, 0.77, 0.97);
-    let dusk = vec3<f32>(1.12, 0.88, 0.85);
+    let inside = smoothstep(-0.29, -0.025, min(edge.x,edge.y)) * smoothstep(0.0,0.2,depth);
+    // A reflected margin carries the cloud texture into the upper sky when looking up close.
+    let sky_uv = 1.0 - abs(fract(coord * 0.5) * 2.0 - 1.0);
+    let clear = vec3f(0.27, 0.47, 0.65) + 0.20 * max(0.0, -ray.y);
+    var photo = mix(clear, river_sky(sky_uv), inside);
+    // The weather is anchored outside the sill, so a turn or a step never drags it across a device.
+    if ray.z < -0.03 {
+        let distance_to_glass = (scene.bench.w - scene.camera.z) / ray.z;
+        if distance_to_glass > 0.0 {
+            let glass = scene.camera.xy + ray.xy * distance_to_glass;
+            let p = vec2f(glass.x, 3.07 - glass.y) * 31.0;
+            let t = scene.lighting.w;
+            let rain = falling(p, t, -0.18, 0.42, 0.08) + falling(p, t, -0.18, 0.42, 0.52)
+                     + falling(p, t, -0.18, 0.42, 0.93);
+            let spray = impact(p, t, 0.52, -0.18, 23.0);
+            let drop = bead(p * 0.74, 0.12, 47.0);
+            let wet = clamp(spray * 0.65 + rain * 0.66 + drop.y * 0.56, 0.0, 0.85);
+            let refracted = river_sky(clamp(sky_uv + vec2f(drop.y, -drop.x) * 0.011, vec2f(0.0), vec2f(1.0)));
+            photo = mix(photo, refracted, inside * min(1.0, 5.0 * (drop.x + drop.y)));
+            photo = mix(photo * (1.0 - drop.x), vec3f(0.84, 0.93, 1.0), wet);
+        }
+    }
+    let night = vec3f(0.44, 0.57, 0.84);
+    let dusk = vec3f(1.07, 0.85, 0.91);
     let tint = mix(mix(night, vec3<f32>(1.0), scene.lighting.x), dusk, scene.lighting.y);
     let vignette = 1.0 - 0.24 * dot(uv - 0.5, uv - 0.5);
     return vec4<f32>(photo * tint * vignette, 1.0);
@@ -65,7 +85,7 @@ struct Vertex {
     @location(1) normal: vec3<f32>,
     @location(2) material: vec4<f32>,
     @location(3) position: vec3<f32>,
-    @location(4) lift: f32,
+    @location(4) highlight: f32,
     @location(5) glow: f32,
     @location(6) uv: vec2<f32>,
     @location(7) preview: f32,
@@ -78,7 +98,7 @@ struct Surface {
     @location(1) normal: vec3<f32>,
     @location(2) local: vec3<f32>,
     @location(3) @interpolate(flat) material: vec4<f32>,
-    @location(4) @interpolate(flat) lift: f32,
+    @location(4) @interpolate(flat) highlight: f32,
     @location(5) @interpolate(flat) glow: f32,
     @location(6) uv: vec2<f32>,
     @location(7) @interpolate(flat) preview: f32,
@@ -87,16 +107,21 @@ struct Surface {
 
 @vertex
 fn project_shadow(v: Vertex) -> @builtin(position) vec4<f32> {
-    let world = v.position + v.point + vec3<f32>(0.0, v.lift * 0.45, 0.0);
+    // The paper strip is too thin for the cached sunlight map to resolve.
+    if v.material.w == 3.0 { return vec4f(2.0, 2.0, 2.0, 1.0); }
+    let world = v.position + v.point;
     return scene.sun_clip * vec4<f32>(world, 1.0);
 }
 
 @vertex
 fn project(v: Vertex) -> Surface {
-    // 빛 웅덩이는 들리지 않고 바닥(책상)에 남는다.
-    let rise = select(v.lift * 0.45, 0.0, v.material.w == 6.0);
-    let world = v.position + v.point + vec3<f32>(0.0, rise, 0.0);
-    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.point, v.material, v.lift, v.glow, v.uv, v.preview, v.rgb);
+    var world = v.position + v.point;
+    if v.material.w == 3.0 {
+        let flutter = sin(scene.lighting.w * 2.1) + 0.35 * sin(scene.lighting.w * 4.3 - 2.4 * v.uv.y);
+        world.x += v.uv.y * v.uv.y * 0.40 * flutter;
+        world.z += v.uv.y * (v.uv.x - 0.5) * 0.21 * flutter;
+    }
+    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.point, v.material, v.highlight, v.glow, v.uv, v.preview, v.rgb);
 }
 
 fn lin(c: vec3<f32>) -> vec3<f32> {
@@ -111,15 +136,15 @@ fn accent() -> vec3<f32> {
 fn light(s: Surface, n: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
     let sun = normalize(vec3<f32>(0.76, 0.45, -0.42));
     let bounce = normalize(vec3<f32>(-0.54, 0.52, 0.61));
-    let gold = vec3<f32>(1.0, 0.64, 0.40);
-    let blue = vec3<f32>(0.42, 0.69, 0.94);
+    let gold = vec3<f32>(1.0, 0.78, 0.59);
+    let blue = vec3<f32>(0.40, 0.66, 1.0);
     let clip = scene.sun_clip * vec4<f32>(s.world + n * 0.012, 1.0);
     let uv = clip.xy * vec2<f32>(0.5, -0.5) + 0.5;
     var visibility = 1.0;
     if all(uv > vec2<f32>(0.0)) && all(uv < vec2<f32>(1.0)) {
         visibility = textureSampleCompareLevel(shadow_map, compare_depth, uv, clip.z);
     }
-    let incident = vec3<f32>(0.25, 0.32, 0.39) * (0.85 + 0.20 * n.y)
+    let incident = vec3<f32>(0.35, 0.42, 0.55) * (0.85 + 0.20 * n.y)
         + gold * max(dot(n, sun), 0.0) * (0.95 + 0.65 * scene.lighting.x) * visibility
         + blue * max(dot(n, bounce), 0.0) * 0.78;
     let strip = vec3<f32>(clamp(s.world.x, scene.bench.x, scene.bench.y), scene.bench.z + 0.20, -2.5) - s.world;
@@ -159,16 +184,30 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
         if (i32(mode - 32.0) / 32) % 2 == 1 { return vec4<f32>(s.material.rgb * tex * (0.65 + 0.35 * s.glow), 1.0); }
         return out(light(s, n, base * lin(tex)), 1.0);
     }
+    if mode == 3.0 {
+        let sun = 1.0 - smoothstep(0.105, 0.135, length((s.uv-vec2f(0.5,0.32))*vec2f(1.0,3.85)));
+        let stripe = step(0.78, s.uv.y) * (1.0-step(0.83, s.uv.y));
+        return vec4f(mix(mix(vec3f(0.98,0.88,0.70),vec3f(0.93,0.38,0.30),sun),vec3f(0.21,0.45,0.61),stripe),1.0);
+    }
+    if mode == 4.0 {
+        let p = s.uv - vec2f(0.66,0.52);
+        let isobar = length(p*vec2f(1.13,0.74)) + 0.035*sin(s.uv.x*11.0+s.uv.y*6.0);
+        let spacing = abs(fract(isobar*10.0)-0.5);
+        let line = (1.0-smoothstep(0.035,0.12,spacing))*(1.0-smoothstep(0.012,0.055,fwidth(isobar)));
+        let spine = 1.0-smoothstep(0.008,0.044,abs(s.uv.x-0.5));
+        let paper = mix(vec3f(0.95,0.91,0.76),vec3f(0.37,0.59,0.71),line);
+        return out(light(s,n,lin(paper*(1.0-0.23*spine))),1.0);
+    }
     if mode == 6.0 {
         let r = length(s.normal.xz);
-        let color = mix(vec3<f32>(0.006, 0.012, 0.020), accent(), s.lift);
+        let color = mix(vec3<f32>(0.006, 0.012, 0.020), accent(), s.highlight);
         return vec4<f32>(color, 0.62 * (1.0 - smoothstep(0.26, 1.0, r)));
     }
     if mode == 15.0 {
         let view_dir = normalize(scene.camera.xyz - s.world);
         let r = reflect(-view_dir, n);
         let rim = pow(1.0 - abs(dot(view_dir, n)), 3.0);
-        let reflection = orbit(vec2<f32>(0.5 + 0.40*r.x, 0.50 - 0.45*r.y));
+        let reflection = river_sky(vec2<f32>(0.5 + 0.40*r.x, 0.50 - 0.45*r.y));
         let sheen = smoothstep(0.72, 0.97, dot(r, normalize(vec3<f32>(0.65, 0.33, -0.68))));
         let glass = mix(vec3<f32>(0.39, 0.55, 0.62), reflection, 0.55) + vec3<f32>(0.19)*sheen;
         return vec4<f32>(glass, 0.15 + rim*0.34 + sheen*0.10);

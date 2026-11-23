@@ -17,6 +17,7 @@ mod rgb;
 mod roster;
 mod scene;
 mod text;
+mod theme;
 mod update;
 
 use std::collections::HashMap;

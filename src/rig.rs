@@ -18,6 +18,7 @@ enum Action {
 }
 
 pub enum PickerAction {
+    Snapshot(PathBuf),
     Resize(u32, u32),
     HandOff,
     Travel(KeyCode, bool),
@@ -32,6 +33,11 @@ impl PickerAction {
     fn parse(action: &str, argument: &str) -> Option<Self> {
         match action {
             "handoff" if argument == "live" => Some(Self::HandOff),
+            "snap" => {
+                let frame: u32 = argument.parse().ok()?;
+                let dir = PathBuf::from(std::env::var_os("KASATERM_VIEW_STATE")?);
+                Some(Self::Snapshot(dir.join(format!("frame-{frame:04}.png"))))
+            }
             "resize" => {
                 let (w, h) = argument.split_once('x')?;
                 let (w, h) = (w.parse().ok()?, h.parse().ok()?);
@@ -52,6 +58,7 @@ impl PickerAction {
                 Some(if action == "hover" { Self::Hover(x, y) } else { Self::Click(x, y) })
             }
             "key" => Some(Self::Key(match argument {
+                "R" => KeyCode::KeyR,
                 "Left" => KeyCode::ArrowLeft,
                 "Right" => KeyCode::ArrowRight,
                 "Up" => KeyCode::ArrowUp,

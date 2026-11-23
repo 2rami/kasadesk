@@ -2,7 +2,7 @@
 
 mod components;
 
-use super::{mat, Mesh};
+use super::{axes, cylindrical_side, mat, Mesh};
 use crate::scene::catalog::Geometry;
 use glam::{vec3, Quat, Vec3};
 use std::f32::consts::{SQRT_2, TAU};
@@ -59,11 +59,6 @@ fn shell_band(m: &mut Mesh, low: f32, high: f32) {
     }
 }
 
-fn axes(n: Vec3) -> (Vec3, Vec3) {
-    let u = if n.y.abs() < 0.90 { Vec3::Y.cross(n).normalize() } else { Vec3::X };
-    (u, n.cross(u).normalize())
-}
-
 fn annulus(m: &mut Mesh, center: Vec3, normal: Vec3, outer: f32, inner: f32, color: Color, material: f32) {
     let (u, v) = axes(normal);
     let edge = |i: usize| {
@@ -76,28 +71,6 @@ fn annulus(m: &mut Mesh, center: Vec3, normal: Vec3, outer: f32, inner: f32, col
             m.face([center, center + a * outer, center + b * outer], color, material);
         } else {
             m.quad([center + a * inner, center + a * outer, center + b * outer, center + b * inner], color, material);
-        }
-    }
-}
-
-fn cylindrical_side(m: &mut Mesh, start: Vec3, end: Vec3, radius: f32, color: Color) {
-    let axis = (end - start).normalize();
-    let (u, v) = axes(axis);
-    let edge = |i: usize| {
-        let a = i as f32 * TAU / 28.0;
-        u * a.cos() + v * a.sin()
-    };
-    for i in 0..28 {
-        let (a, b) = (edge(i), edge(i + 1));
-        for (p, n) in [
-            (start + a * radius, a),
-            (start + b * radius, b),
-            (end + b * radius, b),
-            (start + a * radius, a),
-            (end + b * radius, b),
-            (end + a * radius, a),
-        ] {
-            m.push(p, n, color, mat::SOLID);
         }
     }
 }
