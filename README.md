@@ -82,4 +82,4 @@ Windows 굽기(`.github/workflows/release.yml` 을 태그로 불러 MSI 를 붙�
 
 ## 라이선스
 
-MIT
+[MIT 라이선스](LICENSE). 관측실 배경의 제작 출처와 라이선스는 [orbit.jpg 설명](assets/orbit.jpg.md)에 있어요.
