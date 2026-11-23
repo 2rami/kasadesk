@@ -27,6 +27,7 @@ sha2 = "0.10"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 wgpu = "28"
 winit = "0.30"
+openh264 = "0.9.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"

@@ -13,7 +13,7 @@ import urllib.request
 import gzip
 
 
-def convert(source, output, yaw):
+def convert(source, output, yaw, screen_material):
     import bpy
     from mathutils import Matrix
     import numpy as np
@@ -128,7 +128,7 @@ def convert(source, output, yaw):
                 layer = mesh.uv_layers.get(uv_name) if uv_name else mesh.uv_layers.active
                 if layer:
                     layer.uv.foreach_get('vector', uv.ravel())
-                data[mask, 9] = float(emission)
+                data[mask, 9] = float(emission) + 2 * (emission or bool(material and material.name == screen_material))
                 data[mask, 6:9] = color
                 origin = np.array([slot % grid, slot // grid]) * tile
                 coords = np.nan_to_num(np.clip(uv[ids[mask]], 0, 1), nan=0.5) if slot else 0.5
@@ -191,7 +191,7 @@ def prepare():
                 raise ValueError(f'checksum mismatch: {name}')
             output = work / (name + '.kdm')
             subprocess.run([args.blender, '-b', '-t', '2', '--python-exit-code', '1', '-P', __file__, '--',
-                            str(source.resolve()), str(output.resolve()), str(entry.get('yaw', 0))], check=True)
+                            str(source.resolve()), str(output.resolve()), str(entry.get('yaw', 0)), entry.get('screen_material', '')], check=True)
             with output.open('rb') as stream:
                 hasher = hashlib.sha256()
                 for block in iter(lambda: stream.read(1 << 20), b''):
@@ -209,7 +209,7 @@ def prepare():
 
 if __name__ == '__main__':
     if '--' in sys.argv:
-        src, dst, yaw = sys.argv[sys.argv.index('--') + 1:]
-        convert(Path(src), Path(dst), float(yaw))
+        src, dst, yaw, screen_material = sys.argv[sys.argv.index('--') + 1:]
+        convert(Path(src), Path(dst), float(yaw), screen_material)
     else:
         prepare()

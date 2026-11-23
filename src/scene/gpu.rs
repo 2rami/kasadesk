@@ -10,7 +10,7 @@ use std::ops::Range;
 use super::{Frame, Layout};
 
 const VERTEX_ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 6 => Float32x2];
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32, 5 => Float32];
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32, 5 => Float32, 7 => Float32];
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -18,6 +18,7 @@ struct Instance {
     position: [f32; 3],
     lift: f32,
     glow: f32,
+    preview: f32,
 }
 
 #[repr(C)]
@@ -30,6 +31,7 @@ struct Scene {
     lighting: [f32; 4],
     viewport: [f32; 4],
     bench: [f32; 4],
+    preview_rect: [f32; 4],
 }
 
 pub struct RoomGpu {
@@ -42,6 +44,8 @@ pub struct RoomGpu {
     scene: wgpu::Buffer,
     binding: wgpu::BindGroup,
     room: Option<(mesh::Plan, wgpu::Buffer, u32)>,
+    preview_texture: wgpu::Texture,
+    preview_serial: u64,
     products: wgpu::Buffer,
     ranges: Vec<(Range<u32>, Range<u32>)>,
     instances: Option<(usize, wgpu::Buffer)>,
@@ -106,6 +110,12 @@ impl RoomGpu {
             }, &g.atlas, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * catalog::ATLAS_EDGE), rows_per_image: None },
                 wgpu::Extent3d { width: catalog::ATLAS_EDGE, height: catalog::ATLAS_EDGE, depth_or_array_layers: 1 });
         }
+        let preview_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("KasaDesk preview"), size: wgpu::Extent3d { width: crate::preview::WIDTH, height: crate::preview::HEIGHT, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+        });
+        let preview_view = preview_texture.create_view(&Default::default());
         let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("KasaDesk room scene layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -124,6 +134,10 @@ impl RoomGpu {
                 binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false }, count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None,
             }],
         });
         let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -221,9 +235,10 @@ impl RoomGpu {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&texture_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&preview_view) },
             ],
         });
-        Self { backdrop, solid, glaze, shadows, shadow_depth, shadow_binding, scene, binding, room: None, products, ranges, instances: None, depth: None }
+        Self { backdrop, solid, glaze, shadows, shadow_depth, shadow_binding, scene, binding, room: None, preview_texture, preview_serial: 0, products, ranges, instances: None, depth: None }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -236,6 +251,7 @@ impl RoomGpu {
         view: &wgpu::TextureView,
         layout: &Layout,
         frame: &Frame,
+        preview: Option<(usize, &crate::preview::Picture)>,
     ) {
         let size = texture.size();
         if self.depth.as_ref().is_none_or(|(old, _)| *old != size) {
@@ -267,23 +283,41 @@ impl RoomGpu {
         let sun = vec3(0.76, 0.45, -0.42).normalize();
         let sun_view = Mat4::look_at_rh(target + sun * (half + 20.0), target, Vec3::Y);
         let sun_clip = Mat4::orthographic_rh(-half, half, -half, half, 0.1, 2.0 * half + 45.0) * sun_view;
+        let mut preview_rect = [0.0; 4];
+        let mut preview_size = (0, 0);
+        if let Some((index, pic)) = preview {
+            if let Some(rect) = layout.device_of(index).and_then(|i| layout.main_part(i)).and_then(|p| p.asset())
+                .and_then(|a| a.geometry.as_ref()?.screen) {
+                preview_rect = rect;
+                preview_size = pic.size;
+                if self.preview_serial != pic.serial {
+                    let (w,h) = pic.size;
+                    queue.write_texture(self.preview_texture.as_image_copy(), &pic.rgba, wgpu::TexelCopyBufferLayout {
+                        offset: 0, bytes_per_row: Some(4*w), rows_per_image: None,
+                    }, wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
+                    self.preview_serial = pic.serial;
+                }
+            }
+        }
         queue.write_buffer(&self.scene, 0, bytemuck::bytes_of(&Scene {
             clip_from_world: frame.clip_from_world.to_cols_array_2d(),
             sun_clip: sun_clip.to_cols_array_2d(),
             eye: frame.eye.extend(0.0).to_array(),
             camera: frame.camera.extend(1.0).to_array(),
             lighting: [frame.day, frame.dusk, frame.indoor, 0.0],
-            viewport: [size.width as f32, size.height as f32, 0.0, 0.0],
+            viewport: [size.width as f32, size.height as f32, preview_size.0 as f32, preview_size.1 as f32],
+            preview_rect,
             bench: [left, right, mesh::DESK_Y, 0.0],
         }));
         // 방 한 칸 + 모형 종류마다 줄 세운 기기 자리.
-        let mut data = vec![Instance { position: [0.0; 3], lift: 0.0, glow: 0.0 }];
+        let mut data = vec![Instance { position: [0.0; 3], lift: 0.0, glow: 0.0, preview: 0.0 }];
         let mut ranges = Vec::new();
         for index in 0..self.ranges.len() {
             let start = data.len() as u32;
             for (part, device) in layout.parts.iter().filter(|p| p.asset == Some(index)).map(|p| (p, &layout.devices[p.device])) {
                 let lift = if part.lifts { device.lift } else { 0.0 };
-                data.push(Instance { position: part.position.to_array(), lift, glow: device.glow });
+                data.push(Instance { position: part.position.to_array(), lift, glow: device.glow,
+                    preview: f32::from(part.main && preview_size.0 != 0 && preview.is_some_and(|(i,_)| i == device.index)) });
             }
             ranges.push(start..data.len() as u32);
         }

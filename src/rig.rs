@@ -18,6 +18,9 @@ enum Action {
 }
 
 pub enum PickerAction {
+    Travel(KeyCode, bool),
+    Scroll(f32),
+    Drag(bool),
     Hover(f64, f64),
     Click(f64, f64),
     Key(KeyCode),
@@ -26,6 +29,12 @@ pub enum PickerAction {
 impl PickerAction {
     fn parse(action: &str, argument: &str) -> Option<Self> {
         match action {
+            "down" | "up" => Some(Self::Travel(match argument {
+                "W" => KeyCode::KeyW, "A" => KeyCode::KeyA, "S" => KeyCode::KeyS, "D" => KeyCode::KeyD,
+                "Home" => KeyCode::Home, _ => return None,
+            }, action == "down")),
+            "scroll" => Some(Self::Scroll(argument.parse().ok()?)),
+            "drag" => Some(Self::Drag(match argument { "on" => true, "off" => false, _ => return None })),
             "hover" | "click" => {
                 let (x, y) = argument.split_once(',')?;
                 let (x, y) = (x.parse::<f64>().ok()?, y.parse::<f64>().ok()?);

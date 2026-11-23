@@ -28,15 +28,25 @@
       "name": "Alienware AW3821DW",
       "source": "https://content.hmxmedia.com/dell-aw3821dw-monitor-AR/gltf/dell-aw3821dw-monitor-AR.glb",
       "kind": "display",
-      "sha256": "8d6a0903c6f3503574b08e93241003efa73021bce8df4aa486262f2fa16ac5bd"
+      "sha256": "8d6a0903c6f3503574b08e93241003efa73021bce8df4aa486262f2fa16ac5bd",
+      "screen_material": "screen_fill_env"
     },
     "hyte-y60": {
       "name": "HYTE Y60 Snow White",
       "kind": "case"
+    },
+    "studio-display": {
+      "name": "Apple Studio Display",
+      "source": "https://www.apple.com/105/media/us/studio-display/2026/fcc06a33-5854-47b3-bf6e-b8619f5a4f10/ar/studio-display.usdz",
+      "kind": "display",
+      "sha256": "1a01a62eacec454e89e28c117f4886631437b885bdb7bef40cf341d7c9a6154e",
+      "width_m": 0.623,
+      "screen_offset_m": 0.0015
     }
   },
   "defaults": {
-    "mini-m4": "mini-m4"
+    "mini-m4": "mini-m4",
+    "mini-display": "studio-display"
   },
   "devices": {
     "Mac15,8": {

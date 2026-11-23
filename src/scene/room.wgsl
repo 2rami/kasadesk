@@ -8,6 +8,7 @@ struct Scene {
     lighting: vec4<f32>,
     viewport: vec4<f32>,
     bench: vec4<f32>,
+    preview_rect: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> scene: Scene;
@@ -15,6 +16,8 @@ struct Scene {
 @group(0) @binding(2) var linear_sampler: sampler;
 
 @group(0) @binding(3) var products: texture_2d_array<f32>;
+
+@group(0) @binding(4) var preview_image: texture_2d<f32>;
 
 @group(1) @binding(0) var shadow_map: texture_depth_2d;
 @group(1) @binding(1) var compare_depth: sampler_comparison;
@@ -35,8 +38,18 @@ fn horizon(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
     let dimensions = vec2<f32>(textureDimensions(panorama));
     let aspect = (scene.viewport.x / scene.viewport.y) / (dimensions.x / dimensions.y);
     let cover = min(vec2<f32>(aspect, 1.0 / aspect), vec2<f32>(1.0));
-    let offset = vec2<f32>(scene.eye.x - 0.13, 0.22 - scene.eye.y) * 0.09;
-    let photo = orbit((uv - 0.5) * cover * 0.96 + 0.5 + offset);
+    let aspect_ratio = scene.viewport.x / scene.viewport.y;
+    let right = normalize(cross(vec3<f32>(0.0,1.0,0.0), scene.eye.xyz));
+    let up = cross(scene.eye.xyz,right);
+    let ray = normalize(-scene.eye.xyz + (uv.x-0.5)*0.799*aspect_ratio*right + (0.5-uv.y)*0.799*up);
+    let default_eye = vec3<f32>(sin(0.13)*cos(0.22), sin(0.22), cos(0.13)*cos(0.22));
+    let default_right = normalize(cross(vec3<f32>(0.0,1.0,0.0),default_eye));
+    let depth = dot(ray,-default_eye);
+    let xy = vec2<f32>(dot(ray,default_right)/aspect_ratio, -dot(ray,cross(default_eye,default_right)));
+    let coord = 0.5 + xy / (0.799 * max(depth,0.01)) * cover * 0.96;
+    let edge = min(coord,1.0-coord);
+    let inside = smoothstep(-0.08,0.02,min(edge.x,edge.y)) * smoothstep(0.0,0.2,depth);
+    let photo = mix(vec3<f32>(0.017,0.036,0.061), orbit(clamp(coord,vec2<f32>(0.0),vec2<f32>(1.0))),inside);
     let night = vec3<f32>(0.60, 0.77, 0.97);
     let dusk = vec3<f32>(1.12, 0.88, 0.85);
     let tint = mix(mix(night, vec3<f32>(1.0), scene.lighting.x), dusk, scene.lighting.y);
@@ -52,6 +65,7 @@ struct Vertex {
     @location(4) lift: f32,
     @location(5) glow: f32,
     @location(6) uv: vec2<f32>,
+    @location(7) preview: f32,
 };
 
 struct Surface {
@@ -63,6 +77,7 @@ struct Surface {
     @location(4) @interpolate(flat) lift: f32,
     @location(5) @interpolate(flat) glow: f32,
     @location(6) uv: vec2<f32>,
+    @location(7) @interpolate(flat) preview: f32,
 };
 
 @vertex
@@ -76,7 +91,7 @@ fn project(v: Vertex) -> Surface {
     // 빛 웅덩이는 들리지 않고 바닥(책상)에 남는다.
     let rise = select(v.lift * 0.45, 0.0, v.material.w == 6.0);
     let world = v.position + v.point + vec3<f32>(0.0, rise, 0.0);
-    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.point, v.material, v.lift, v.glow, v.uv);
+    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.point, v.material, v.lift, v.glow, v.uv, v.preview);
 }
 
 fn lin(c: vec3<f32>) -> vec3<f32> {
@@ -127,7 +142,16 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
     let n = normalize(s.normal + vec3<f32>(0.0, 1e-5, 0.0));
     if mode >= 32.0 {
         let tex = textureSampleLevel(products, linear_sampler, s.uv, i32(mode - 32.0) % 32, 0.0).rgb;
-        if mode >= 64.0 { return vec4<f32>(s.material.rgb * tex * (0.65 + 0.35 * s.glow), 1.0); }
+        if mode >= 96.0 && s.preview > 0.5 {
+            let rect = scene.preview_rect;
+            let xy = (s.local.xy - rect.xy) / rect.zw;
+            let ratio = (rect.z / rect.w) * (scene.viewport.w / scene.viewport.z);
+            let uv = (vec2<f32>(xy.x, 1.0-xy.y) - 0.5) * max(vec2<f32>(ratio, 1.0/ratio), vec2<f32>(1.0)) + 0.5;
+            if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { return vec4<f32>(0.012,0.014,0.018,1.0); }
+            let coord = (uv * (scene.viewport.zw - 1.0) + 0.5) / vec2<f32>(textureDimensions(preview_image));
+            return vec4<f32>(textureSampleLevel(preview_image, linear_sampler, coord, 0.0).rgb, 1.0);
+        }
+        if (i32(mode - 32.0) / 32) % 2 == 1 { return vec4<f32>(s.material.rgb * tex * (0.65 + 0.35 * s.glow), 1.0); }
         return out(light(s, n, base * lin(tex)), 1.0);
     }
     if mode == 6.0 {
@@ -145,6 +169,14 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
     let grain_uv = (s.world.x + s.world.z + s.world.y * 0.37) * 138.0;
     let fine = sin(grain_uv) * (1.0 - smoothstep(0.8, 3.1, fwidth(grain_uv)));
     var tone = base * (1.0 + 0.035 * fine);
+    if mode == 13.0 {
+        let grain = sin(s.world.z * 27.0 + 1.65 * sin(s.world.x * 0.48 + s.world.z * 1.8) + 0.9 * sin(s.world.x * 0.97));
+        tone *= 0.92 + 0.12 * grain * (1.0 - smoothstep(0.04, 0.16, fwidth(s.world.z)));
+    }
+    if mode == 14.0 {
+        let weave = cos(s.world.x * 97.0) * cos(s.world.z * 89.0);
+        tone *= 1.0 + 0.075 * weave * (1.0 - smoothstep(0.015, 0.05, fwidth(s.world.x)));
+    }
     if mode == 2.0 {
         let seam = abs(fract(s.world.xz * vec2<f32>(0.2, 0.34)) - 0.5);
         let joint = smoothstep(0.494, 0.499, max(seam.x, seam.y));

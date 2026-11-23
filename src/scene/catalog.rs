@@ -18,6 +18,7 @@ pub struct Geometry {
     pub atlas: Vec<u8>,
     pub center: Vec3,
     pub half: Vec3,
+    pub screen: Option<[f32; 4]>,
 }
 
 pub struct Asset {
@@ -80,7 +81,7 @@ impl Catalog {
                 f.ends_with(".kdm") && f.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'.'))
             });
             let geometry = if let Some(path) = file.map(|f| dir.join(f)).filter(|p| p.is_file()) {
-                match Geometry::load(&path, model, assets.len(), remaining_vertices) {
+                match Geometry::load(&path, model, assets.len(), remaining_vertices, value["width_m"].as_f64(), value["screen_offset_m"].as_f64().unwrap_or(0.0)) {
                     Ok(g) => { remaining_vertices -= g.vertices.len(); Some(g) }
                     Err(e) => { eprintln!("[models] {key}: {e:#}"); None }
                 }
@@ -102,10 +103,11 @@ impl Catalog {
     }
 
     pub fn kind(&self, machine: &Machine) -> DeviceKind {
-        if self.binding(machine, "display").is_some() || self.binding(machine, "case").is_some() {
+        if self.binding(machine, "case").is_some() {
             return DeviceKind::Desktop;
         }
-        self.binding(machine, "computer").and_then(|key| self.indices.get(key)).map_or(machine.kind, |i| {
+        let fallback = if !machine.kind.on_rack() && self.binding(machine, "display").is_some() { DeviceKind::Desktop } else { machine.kind };
+        self.binding(machine, "computer").and_then(|key| self.indices.get(key)).map_or(fallback, |i| {
             match self.assets[*i].model {
                 Model::Pro => DeviceKind::Pro, Model::Air => DeviceKind::Air, Model::Laptop => DeviceKind::Laptop,
                 Model::Mini => DeviceKind::Mini, Model::MiniM4 => DeviceKind::MiniM4, _ => machine.kind,
@@ -115,13 +117,14 @@ impl Catalog {
 
     pub fn resolve(&self, machine: &Machine, model: Model) -> Option<usize> {
         let slot = match model { Model::Monitor => "display", Model::Tower => "case", _ => "computer" };
-        let key = self.binding(machine, slot).or_else(|| self.manifest["defaults"][model.key()].as_str())?;
+        let default_key = if model == Model::Monitor && self.kind(machine).on_rack() { "mini-display" } else { model.key() };
+        let key = self.binding(machine, slot).or_else(|| self.manifest["defaults"][default_key].as_str())?;
         self.indices.get(key).copied().filter(|&i| self.assets[i].model == model)
     }
 }
 
 impl Geometry {
-    fn load(path: &Path, model: Model, layer: usize, remaining: usize) -> Result<Self> {
+    fn load(path: &Path, model: Model, layer: usize, remaining: usize, width_m: Option<f64>, screen_offset_m: f64) -> Result<Self> {
         let f = std::fs::File::open(path)?;
         let length = f.metadata()?.len();
         let mut f = BufReader::new(f);
@@ -135,15 +138,23 @@ impl Geometry {
         let mut vertices = vec![bytemuck::Zeroable::zeroed(); count];
         f.read_exact(bytemuck::cast_slice_mut::<Vertex, u8>(&mut vertices))?;
         let (anchor, half) = model.hull();
-        let scale = half.x * 2.0;
+        let scale = width_m.map_or(half.x * 2.0, |w| (w as f32 / 0.127).clamp(0.1, half.x * 2.0));
+        let (mut screen_lo, mut screen_hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for v in &mut vertices {
             let p = Vec3::from_array(v.point);
             ensure!(p.is_finite() && p.abs().max_element() < 8.0 && Vec3::from_array(v.normal).is_finite()
                 && v.material.iter().chain(&v.uv).all(|n| n.is_finite()), "invalid vertex");
-            let world = p * scale + vec3(0.0, 0.0, anchor.z);
+            let mut world = p * scale + vec3(0.0, 0.0, anchor.z);
+            let flags = v.material[3] as u8;
+            if flags & 2 != 0 {
+                // Some AR files put opaque cover glass above the original luminous panel in this renderer.
+                world.z += (screen_offset_m as f32).clamp(0.0, 0.005) / 0.127;
+                screen_lo = screen_lo.min(world);
+                screen_hi = screen_hi.max(world);
+            }
+            v.material[3] = VENDOR_MATERIAL + layer as f32 + 32.0 * f32::from(flags & 3);
             v.point = world.to_array();
-            v.material[3] = VENDOR_MATERIAL + layer as f32 + if v.material[3] > 0.5 { 32.0 } else { 0.0 };
             lo = lo.min(world);
             hi = hi.max(world);
         }
@@ -152,7 +163,9 @@ impl Geometry {
         let reader = image::ImageReader::with_format(std::io::Cursor::new(&png), image::ImageFormat::Png);
         if reader.into_dimensions()? != (ATLAS_EDGE, ATLAS_EDGE) { bail!("unexpected atlas dimensions") }
         let atlas = image::load_from_memory_with_format(&png, image::ImageFormat::Png)?.into_rgba8().into_raw();
-        Ok(Self { vertices, atlas, center: (lo + hi) / 2.0, half: (hi - lo) / 2.0 })
+        let screen = (screen_hi.x > screen_lo.x && screen_hi.y > screen_lo.y).then(||
+            [screen_lo.x, screen_lo.y, screen_hi.x - screen_lo.x, screen_hi.y - screen_lo.y]);
+        Ok(Self { vertices, atlas, screen, center: (lo + hi) / 2.0, half: (hi - lo) / 2.0 })
     }
 }
 

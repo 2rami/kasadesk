@@ -11,6 +11,7 @@ mod desk;
 mod ipc;
 mod login;
 mod net;
+mod preview;
 mod rig;
 mod roster;
 mod scene;

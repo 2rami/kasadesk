@@ -9,7 +9,7 @@ use kasa_castview::{key_mods, Click, ScreenView, Style, Surface};
 use kasa_gridview::{GridFonts, GridRenderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{DeviceId, ElementState, Ime, MouseButton, WindowEvent};
+use winit::event::{DeviceId, ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId};
@@ -35,6 +35,7 @@ const TEXTURE: &str = "kasadesk:screen";
 pub enum Ev {
     /// 새 장·상태 — 다시 그린다.
     Wake,
+    Preview(WindowId),
     /// 그 기기를 연다(None 이면 고르기 창).
     Open(Option<String>),
     Roster { machines: Vec<Machine>, app_alive: bool },
@@ -66,6 +67,7 @@ struct Win {
     closed_since: Option<Instant>,
     cursor: (f32, f32),
     room: Room,
+    preview: crate::preview::Preview,
     ui: Ui,
 }
 
@@ -229,6 +231,7 @@ impl Desk {
         }
         if let Some(w) = self.windows.values_mut().find(|w| w.label.is_none()) {
             w.label = label;
+            w.preview = Default::default();
             w.room.suspend();
             w.window.set_min_inner_size(None::<LogicalSize<f64>>);
             w.window.set_cursor(CursorIcon::Default);
@@ -259,7 +262,7 @@ impl Desk {
         };
         let mut win = Win {
             gpu, window, label, view: None, display: None, closed_since: None,
-            cursor: (0.0, 0.0), room: Room::default(), ui: Ui::new(),
+            cursor: (0.0, 0.0), room: Room::default(), preview: Default::default(), ui: Ui::new(),
         };
         if win.label.is_none() {
             win.room.reflow(win.logical(), &self.machines);
@@ -324,7 +327,8 @@ impl Desk {
             let (login, cred) = (&mut self.login, self.session.get());
             #[cfg(windows)]
             let update = &mut self.update;
-            w.room.paint(&mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, |g, ui, size| {
+            let preview = w.room.selected().and_then(|i| Some((i, w.preview.picture(self.machines.get(i)?)?)));
+            w.room.paint(preview.as_ref().map(|(i, p)| (*i, p.as_ref())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, |g, ui, size| {
                 login.paint_chip(g, ui, size.0, cred.as_ref());
                 #[cfg(windows)]
                 if let Some((version, rect)) = update.as_mut() {
@@ -386,16 +390,26 @@ impl Desk {
                 }
                 let action = self.login.click(p, self.session.get().is_some());
                 if !matches!(action, Action::None) || self.login.open {
+                    w.room.stop_navigation();
                     self.login_action(action);
                     return;
                 }
             }
             if self.login.open {
+                w.room.stop_navigation();
                 return;
             }
             let redraw = match event {
                 WindowEvent::CursorMoved { .. } => w.room.pointer(Some(w.cursor)),
                 WindowEvent::CursorLeft { .. } => w.room.pointer(None),
+                WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
+                    w.room.drag((*state == ElementState::Pressed).then_some(w.cursor))
+                }
+                WindowEvent::MouseWheel { delta, .. } => w.room.scroll(match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(d) => d.y as f32 / (45.0 * w.gpu.scale.max(0.5)),
+                }),
+                WindowEvent::PinchGesture { delta, .. } => w.room.scroll(*delta as f32 * 18.0),
                 WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                     if w.room.click_page(&self.machines) {
                         true
@@ -481,6 +495,10 @@ impl Desk {
         }
         let Some(view) = w.view.as_mut() else {
             if w.label.is_none() {
+                if !pressed {
+                    if let Some(code) = code { w.room.travel_key(code, false); }
+                }
+                if self.login.open { w.room.stop_navigation(); }
                 if let Some(action) = self.login.key(event) {
                     self.login_action(action);
                     return;
@@ -490,6 +508,7 @@ impl Desk {
                 return;
             }
             if let Some(code) = code {
+                if w.room.travel_key(code, pressed) { w.window.request_redraw(); return; }
                 self.picker_key(id, code, event.repeat);
             }
             return;
@@ -538,6 +557,20 @@ impl Desk {
         let (x, y, click) = match action {
             PickerAction::Hover(x, y) => (x, y, false),
             PickerAction::Click(x, y) => (x, y, true),
+            PickerAction::Travel(code, pressed) => {
+                if let Some(w) = self.windows.get_mut(&id) { w.room.travel_key(code, pressed); w.window.request_redraw(); }
+                return;
+            }
+            PickerAction::Scroll(steps) => {
+                self.pointer_event(id, &WindowEvent::MouseWheel { device_id: DeviceId::dummy(),
+                    delta: MouseScrollDelta::LineDelta(0.0, steps), phase: winit::event::TouchPhase::Moved });
+                return;
+            }
+            PickerAction::Drag(pressed) => {
+                self.pointer_event(id, &WindowEvent::MouseInput { device_id: DeviceId::dummy(), button: MouseButton::Right,
+                    state: if pressed { ElementState::Pressed } else { ElementState::Released } });
+                return;
+            }
             PickerAction::Key(code) => {
                 self.picker_key(id, code, false);
                 return;
@@ -578,6 +611,9 @@ impl ApplicationHandler<Ev> for Desk {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Ev) {
         match event {
+            Ev::Preview(id) => {
+                if let Some(w) = self.windows.get(&id).filter(|w| w.label.is_none()) { w.window.request_redraw(); }
+            }
             Ev::Wake => {
                 for w in self.windows.values().filter(|w| w.label.is_some()) {
                     w.window.request_redraw();
@@ -614,7 +650,7 @@ impl ApplicationHandler<Ev> for Desk {
                     (if m.fresh { path } else { format!("{path} · 지난 주소") }, up)
                 }).unzip();
                 let reflow = machines.len() != self.machines.len() || machines.iter().zip(&self.machines)
-                    .any(|(m, old)| m.label != old.label || m.kind != old.kind);
+                    .any(|(m, old)| m.label != old.label || m.kind != old.kind || m.model_id != old.model_id || m.kasanet.get("id") != old.kasanet.get("id"));
                 let redraw = reflow || paths != self.paths || live != self.live || app_alive != self.app_alive;
                 self.machines = machines;
                 self.paths = paths;
@@ -681,6 +717,7 @@ impl ApplicationHandler<Ev> for Desk {
                 if *f {
                     self.focused = Some(id);
                 } else if self.focused == Some(id) {
+                    if let Some(w) = self.windows.get_mut(&id) { w.room.stop_navigation(); }
                     self.focused = None;
                 }
             }
@@ -748,7 +785,12 @@ impl ApplicationHandler<Ev> for Desk {
         for label in arrived {
             self.open(event_loop, Some(label));
         }
-        for w in self.windows.values().filter(|w| w.label.is_none()) {
+        for (&id, w) in self.windows.iter_mut().filter(|(_, w)| w.label.is_none()) {
+            let target = w.room.selected().filter(|&i| self.live.get(i) == Some(&true)
+                && !self.login.open && (self.focused == Some(id) || self.test.drives_picker()) && w.room.has_screen(i)).and_then(|i| self.machines.get(i));
+            let proxy = self.proxy.clone();
+            if w.preview.sync(target, &self.net, move || { let _ = proxy.send_event(Ev::Preview(id)); }) { w.window.request_redraw(); }
+            if let Some(at) = w.preview.next_wake() { schedule(&mut next, at); }
             if let Some(at) = w.room.next_frame() {
                 if at <= now {
                     w.window.request_redraw();
