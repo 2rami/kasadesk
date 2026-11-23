@@ -15,8 +15,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::roster::{DeviceKind, Machine};
 
-/// 기본 관문 — 본 앱 `kasa_device::mobile::DEFAULT_GATEWAY` 와 같다. 리그는 `KASATERM_VIEW_GATEWAY`.
-const DEFAULT_GATEWAY: &str = "https://kasaterm.debimarlene.com";
+/// 기본 관문 — 리그는 `KASATERM_VIEW_GATEWAY`. 옛 이름(`kasaterm.debimarlene.com`)도 같은 관문으로 살아 있다.
+const DEFAULT_GATEWAY: &str = "https://kasaterm.kasa.page";
+/// 같은 관문의 공식 이름들. 관문은 어느 이름으로 불러도 승인 주소를 제 공개 이름(지금은 옛 이름)으로 돌려준다 — 그래서 승인
+/// 주소는 부른 이름이 아니라 이 목록으로 가린다.
+const GATEWAY_ORIGINS: [&str; 2] = ["https://kasaterm.kasa.page", "https://kasaterm.debimarlene.com"];
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// 브라우저 로그인을 기다리는 상한 — 관문 요청 수명(10분)과 같다.
 const OAUTH_WAIT: Duration = Duration::from_secs(10 * 60);
@@ -195,7 +198,7 @@ pub async fn oauth_login(client: &reqwest::Client, origin: &str, provider: &str,
     }
     let url = v.get("authorization_url").and_then(Value::as_str).ok_or("관문이 승인 주소를 안 줬어요")?;
     // 관문 자기 주소만 연다 — 다른 곳으로 보내는 답이면 쓰지 않는다.
-    if !url.starts_with(&format!("{origin}/relay/oauth/authorize/")) {
+    if !own_authorize_url(origin, url) {
         return Err("관문이 낯선 승인 주소를 줬어요".into());
     }
     open(url);
@@ -258,6 +261,11 @@ async fn finish(request: reqwest::RequestBuilder, origin: &str) -> Result<Creden
 pub async fn report_ids(client: &reqwest::Client, c: &Credential, view_id: &str) -> bool {
     let res = client.post(format!("{}/relay/kasanet/ids", c.origin)).bearer_auth(&c.token).json(&json!({ "ids": [view_id] })).send().await;
     res.is_ok_and(|r| r.status().is_success() || r.status() == reqwest::StatusCode::NOT_FOUND)
+}
+
+/// 관문 자기 승인 주소인가 — 부른 이름이거나 같은 관문의 공식 이름.
+fn own_authorize_url(origin: &str, url: &str) -> bool {
+    std::iter::once(origin).chain(GATEWAY_ORIGINS).any(|o| url.starts_with(&format!("{}/relay/oauth/authorize/", o.trim_end_matches('/'))))
 }
 
 /// 되돌아온 요청 중 우리 `state` 를 실은 것만 받는다 — 다른 방문은 404 로 돌려보내고 기다림을 이어 간다.
@@ -405,5 +413,21 @@ mod tests {
         assert_eq!(decode("a%2Bb%3D%3D"), "a+b==");
         assert_eq!(decode("x+y"), "x y");
         assert_eq!(decode("%zz"), "%zz");
+    }
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    use super::own_authorize_url;
+
+    #[test]
+    fn authorize_urls_are_accepted_only_from_the_gateway_names() {
+        let new = "https://kasaterm.kasa.page";
+        assert!(own_authorize_url(new, "https://kasaterm.debimarlene.com/relay/oauth/authorize/abc"));
+        assert!(own_authorize_url(new, "https://kasaterm.kasa.page/relay/oauth/authorize/abc"));
+        assert!(own_authorize_url("http://127.0.0.1:8790", "http://127.0.0.1:8790/relay/oauth/authorize/x"));
+        assert!(!own_authorize_url(new, "https://evil.example/relay/oauth/authorize/abc"));
+        assert!(!own_authorize_url(new, "https://kasaterm.kasa.page.evil.example/relay/oauth/authorize/abc"));
+        assert!(!own_authorize_url(new, "https://kasaterm.kasa.page/elsewhere"));
     }
 }
