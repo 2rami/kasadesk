@@ -714,10 +714,21 @@ impl ApplicationHandler<Ev> for Desk {
                 }
             }
             WindowEvent::Focused(f) => {
+                // 창을 오가는 사이 조합키(⌘Tab 의 ⌘)를 뗀 것은 이 창에 안 온다 — 들고 있던 값을 버린다. 안 버리면 돌아와 누르는
+                // 클릭·글자가 그 기기에 Alt 등이 눌린 채로 가서 조작이 먹통처럼 보인다.
+                self.modifiers = ModifiersState::empty();
                 if *f {
                     self.focused = Some(id);
                 } else if self.focused == Some(id) {
-                    if let Some(w) = self.windows.get_mut(&id) { w.room.stop_navigation(); }
+                    if let Some(w) = self.windows.get_mut(&id) {
+                        w.room.stop_navigation();
+                        // 누른 채 다른 앱으로 가면 뗌이 이 창에 안 온다 — 그 기기에 단추가 눌린 채 남지 않게 여기서 뗀다.
+                        let at = (f64::from(w.cursor.0), f64::from(w.cursor.1));
+                        if let Some(view) = w.view.as_mut().filter(|v| v.buttons != 0) {
+                            eprintln!("[kasadesk] 창을 떠나며 눌린 단추({})를 뗀다", view.buttons);
+                            view.pointer(at, 0, 0);
+                        }
+                    }
                     self.focused = None;
                 }
             }
