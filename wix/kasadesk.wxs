@@ -1,0 +1,47 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- KasaDesk 설치기(WiX 3). 판마다 새 Product Id 와 MajorUpgrade 로 앞 판을 갈아 끼운다 — UpgradeCode 는 바꾸지 않는다. -->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
+     xmlns:fire='http://schemas.microsoft.com/wix/FirewallExtension'>
+    <Product Id='*' Name='KasaDesk' UpgradeCode='3F29BD6A-5A41-4FBC-BBA1-D6813EAFF6C4'
+             Manufacturer='momewomo' Language='1042' Codepage='949' Version='$(var.Version)'>
+        <Package Id='*' Keywords='Installer' Description='KasaDesk: 다른 기기 화면 보기' Manufacturer='momewomo'
+                 InstallerVersion='450' Languages='1042' Compressed='yes' InstallScope='perMachine' SummaryCodepage='949'/>
+        <MajorUpgrade Schedule='afterInstallInitialize'
+                      DowngradeErrorMessage='더 새로운 [ProductName] 이 이미 깔려 있어요. 설치를 마칠게요.'/>
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes'/>
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramFiles64Folder' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='KasaDesk'>
+                    <Component Id='Binary' Guid='*' Win64='yes'>
+                        <File Id='deskexe' Name='kasadesk.exe' DiskId='1' Source='$(var.BinDir)\kasadesk.exe' KeyPath='yes'/>
+                        <!-- 직통 길(구멍 뚫기)의 들어오는 UDP — 사람 권한 프로세스라 처음 뜰 때 묻기 창이 뜨지 않게 미리 연다. -->
+                        <fire:FirewallException Id='DeskUdp' Name='KasaDesk' Program='[#deskexe]' Protocol='udp' Scope='any' IgnoreFailure='yes'/>
+                    </Component>
+                    <Component Id='License' Guid='*' Win64='yes'>
+                        <File Id='LicenseFile' Name='LICENSE.txt' DiskId='1' Source='LICENSE' KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
+            <Directory Id='ProgramMenuFolder'/>
+        </Directory>
+
+        <DirectoryRef Id='ProgramMenuFolder'>
+            <Component Id='StartMenuShortcut' Guid='*'>
+                <Shortcut Id='DeskShortcut' Name='KasaDesk' Description='다른 기기 화면 보기'
+                          Target='[APPLICATIONFOLDER]kasadesk.exe' WorkingDirectory='APPLICATIONFOLDER' Icon='DeskICO'/>
+                <RegistryValue Root='HKCU' Key='Software\KasaDesk' Name='shortcut' Type='integer' Value='1' KeyPath='yes'/>
+            </Component>
+        </DirectoryRef>
+
+        <Feature Id='Main' Level='1' Title='KasaDesk'>
+            <ComponentRef Id='Binary'/>
+            <ComponentRef Id='License'/>
+            <ComponentRef Id='StartMenuShortcut'/>
+        </Feature>
+
+        <Icon Id='DeskICO' SourceFile='assets\desk.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='DeskICO'/>
+        <Property Id='ARPHELPLINK' Value='https://github.com/2rami/kasadesk'/>
+    </Product>
+</Wix>

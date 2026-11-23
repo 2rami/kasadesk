@@ -1,0 +1,54 @@
+[package]
+name = "kasadesk"
+description = "KasaDesk: a standalone viewer for another machine's screen over kasanet. It keeps the picture while the kasaterm app restarts."
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/2rami/kasadesk"
+
+# 공용 크레이트는 카사텀 서브모듈(`kasaterm/`)의 고정 커밋에서 받는다 — 카사텀 폰트가 LFS 라 cargo git 의존은 빈 포인터를 굽는다.
+[dependencies]
+anyhow = "1"
+arboard = "3"
+base64 = "0.22"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.25"
+kasa-cast = { path = "kasaterm/crates/kasa-cast" }
+kasa-cells = { path = "kasaterm/crates/kasa-cells" }
+kasa-castview = { path = "kasaterm/crates/kasa-castview" }
+kasa-gridview = { path = "kasaterm/crates/kasa-gridview" }
+kasa-ime = { path = "kasaterm/crates/kasa-ime" }
+kasa-net = { path = "kasaterm/crates/kasa-net" }
+ring = "0.17"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "json"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+wgpu = "28"
+winit = "0.30"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# 카사텀과 같은 규칙 — 버그를 잡는 correctness·suspicious 묶음만 기본값, 모양 묶음은 끈다.
+[lints.clippy]
+style = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+perf = { level = "allow", priority = -1 }
+wildcard_imports = "warn"
+ref_option = "warn"
+ptr_arg = "warn"
+borrowed_box = "warn"
+
+# 카사텀 크레이트는 이 워크스페이스에 들이지 않는다 — 그쪽 루트(`kasaterm/Cargo.toml`)에서 판·기능을 물려받는다.
+[workspace]
+exclude = ["kasaterm"]

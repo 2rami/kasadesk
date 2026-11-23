@@ -1,0 +1,4 @@
+[submodule "kasaterm"]
+	path = kasaterm
+	url = https://github.com/2rami/kasaterm.git
+	shallow = true
