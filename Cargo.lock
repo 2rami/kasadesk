@@ -2071,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "kasa-cast"
-version = "0.2.267"
+version = "0.2.268"
 dependencies = [
  "bytes",
  "kasa-net",
@@ -2082,7 +2082,7 @@ dependencies = [
 
 [[package]]
 name = "kasa-cast-host"
-version = "0.2.267"
+version = "0.2.268"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -2105,7 +2105,7 @@ dependencies = [
 
 [[package]]
 name = "kasa-castview"
-version = "0.2.267"
+version = "0.2.268"
 dependencies = [
  "block2 0.6.2",
  "kasa-cast",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "kasa-cells"
-version = "0.2.267"
+version = "0.2.268"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "kasa-gridview"
-version = "0.2.267"
+version = "0.2.268"
 dependencies = [
  "anyhow",
  "image",
@@ -2148,11 +2148,11 @@ dependencies = [
 
 [[package]]
 name = "kasa-ime"
-version = "0.2.267"
+version = "0.2.268"
 
 [[package]]
 name = "kasa-net"
-version = "0.2.267"
+version = "0.2.268"
 dependencies = [
  "anyhow",
  "igd-next 0.17.1",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "kasa-screen"
-version = "0.2.267"
+version = "0.2.268"
 dependencies = [
  "anyhow",
  "serde",
