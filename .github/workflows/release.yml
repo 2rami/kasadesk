@@ -24,13 +24,21 @@ env:
 
 jobs:
   msi:
-    runs-on: windows-latest
+    # 저장소 변수 WINDOWS_RUNNER(kasa-home — 집 PC 자체 러너)가 있으면 그 러너, 없으면 GitHub 러너. 집 PC 가 꺼져 있으면 변수를 지운다.
+    runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.sha }}
           submodules: true
           lfs: false
+          # 자체 러너는 target 을 이어 쓴다.
+          clean: ${{ vars.WINDOWS_RUNNER == '' }}
+
+      - name: Clear previous packages
+        if: vars.WINDOWS_RUNNER != ''
+        shell: pwsh
+        run: Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
 
       - name: Fonts from the kasaterm submodule
         run: git -C kasaterm lfs pull --include="crates/kasa-gridview/assets/fonts/*"
@@ -40,6 +48,7 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+        if: vars.WINDOWS_RUNNER == ''
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
