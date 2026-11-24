@@ -110,6 +110,8 @@ pub struct Machine {
     pub fresh: bool,
     /// 관문 계정으로도 보이는 기기의 관문 기기 id — 이 보기 앱 id 를 그 기기에 등록할 때 쓴다(`account::register`).
     pub account: Option<String>,
+    /// 소유자와 관문이 모두 같아야 계정에서 확인한 팬 배치를 다시 쓸 수 있다.
+    pub rgb_owner: Option<(String, String)>,
 }
 
 /// 이번에 배운 것.
@@ -161,7 +163,7 @@ pub fn fetch(app: &str) -> Option<Snapshot> {
             let kind = DeviceKind::classify(&label, &version);
             let kasanet = version.get("kasanet")?.clone();
             let id = kasanet.get("id").and_then(Value::as_str);
-            (id.is_some() && id != own_id.as_deref()).then_some(Machine { label, kind, model_id: version["model"].as_str().map(str::to_owned), kasanet, fresh: true, account: None })
+            (id.is_some() && id != own_id.as_deref()).then_some(Machine { label, kind, model_id: version["model"].as_str().map(str::to_owned), kasanet, fresh: true, account: None, rgb_owner: None })
         })
         .collect();
     Some(Snapshot { machines, app_alive: true, listed })
@@ -194,6 +196,7 @@ pub fn with_account(snap: &mut Snapshot, account: Vec<Machine>) {
     for mut a in account {
         if let Some(local) = snap.machines.iter_mut().find(|m| id(m).is_some() && id(m) == id(&a)) {
             local.account = a.account;
+            local.rgb_owner = a.rgb_owner;
             if local.model_id.is_none() { local.model_id = a.model_id; }
             continue;
         }
@@ -217,7 +220,7 @@ pub fn load(path: &PathBuf) -> Vec<Machine> {
             let kind = m.get("kind").and_then(Value::as_str).and_then(DeviceKind::hint)
                 .unwrap_or_else(|| DeviceKind::classify(&label, &Value::Null));
             let kind = kind.with_label(&label);
-            Some(Machine { label, kind, model_id: m["model"].as_str().map(str::to_owned), kasanet: m.get("kasanet")?.clone(), fresh: false, account: None })
+            Some(Machine { label, kind, model_id: m["model"].as_str().map(str::to_owned), kasanet: m.get("kasanet")?.clone(), fresh: false, account: None, rgb_owner: None })
         })
         .collect()
 }
@@ -236,7 +239,7 @@ mod tests {
     use super::*;
 
     fn m(label: &str, fresh: bool) -> Machine {
-        Machine { label: label.into(), model_id: None, kind: DeviceKind::Mini, kasanet: json!({ "id": label }), fresh, account: None }
+        Machine { label: label.into(), model_id: None, kind: DeviceKind::Mini, kasanet: json!({ "id": label }), fresh, account: None, rgb_owner: None }
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub const SPOTS: [&str; 6] = ["top1", "top2", "top3", "left1", "right1", "right2
 pub const NAMES: [&str; 6] = ["상단 1", "상단 2", "상단 3", "후면", "측면 상단", "측면 하단"];
 pub type Color = [u8; 3];
 
+#[derive(PartialEq)]
 pub struct Config {
     device: String,
     host: String,
@@ -158,6 +159,47 @@ impl Snapshot {
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub enum Target {
+    Ssh(Arc<Config>),
+    Account(crate::account::Credential, String),
+}
+
+impl Target {
+    pub fn for_machine(machine: &Machine, cred: Option<&crate::account::Credential>, ssh: Option<&Arc<Config>>) -> Option<Self> {
+        if let (Some(c), Some(id), Some((origin, owner))) = (cred, &machine.account, &machine.rgb_owner) {
+            if c.origin == *origin && c.account == *owner {
+                return Some(Self::Account(c.clone(), id.clone()));
+            }
+        }
+        ssh.filter(|config| config.matches(machine)).map(|config| Self::Ssh(config.clone()))
+    }
+}
+
+enum Channel {
+    Ssh(Arc<Config>, Pipe),
+    Account(reqwest::Client, crate::account::Credential, String),
+}
+
+impl Channel {
+    fn open(target: Target) -> Result<Self> {
+        Ok(match target {
+            Target::Ssh(config) => {
+                let pipe = Pipe::open(&config)?;
+                Self::Ssh(config, pipe)
+            }
+            Target::Account(cred, id) => Self::Account(crate::account::client(), cred, id),
+        })
+    }
+
+    async fn request(&mut self, value: Value) -> Result<Value> {
+        match self {
+            Self::Ssh(config, pipe) => pipe.request(config, value).await,
+            Self::Account(client, cred, id) => crate::account::rgb_request(client, cred, id, &value).await,
+        }
+    }
+}
+
 struct Pipe {
     _ssh: Child,
     input: ChildStdin,
@@ -232,19 +274,19 @@ impl Drop for Session {
     }
 }
 impl Session {
-    pub fn start(rt: &tokio::runtime::Handle, cfg: Arc<Config>, notify: impl Fn(Update) + Send + Sync + 'static) -> Self {
+    pub fn start(rt: &tokio::runtime::Handle, target: Target, notify: impl Fn(Update) + Send + Sync + 'static) -> Self {
         let (tx, mut rx) = mpsc::channel::<(usize, Option<Color>)>(1);
         let task = rt.spawn(async move {
             let run = async {
-                let mut pipe = Pipe::open(&cfg)?;
+                let mut channel = Channel::open(target)?;
                 let mut applied = false;
                 loop {
-                    let data = pipe.request(&cfg, json!({"op":"snapshot"})).await?;
+                    let data = channel.request(json!({"op":"snapshot"})).await?;
                     notify(Update { result: Ok(Snapshot::parse(&data)?), applied });
                     applied = false;
                     match timeout(Duration::from_millis(1600), rx.recv()).await {
                         Ok(Some((spot, color))) => {
-                            pipe.request(&cfg, json!({"op":"color","spot":SPOTS[spot],"color":color.map(hex)})).await?;
+                            channel.request(json!({"op":"color","spot":SPOTS[spot],"color":color.map(hex)})).await?;
                             applied = true;
                         }
                         Ok(None) => return Ok::<_, anyhow::Error>(()),
@@ -267,6 +309,25 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_color_control_follows_both_owner_and_gateway() {
+        let mut credential = crate::account::Credential {
+            origin: "https://gateway.invalid".into(), account: "studio".into(), token: "fixture".into(), display: String::new(),
+        };
+        let machine = Machine {
+            label: "Studio PC".into(), kind: crate::roster::DeviceKind::Desktop, model_id: None,
+            kasanet: Value::Null, fresh: true, account: Some("machine-id".into()),
+            rgb_owner: Some((credential.origin.clone(), credential.account.clone())),
+        };
+        assert!(matches!(Target::for_machine(&machine, Some(&credential), None), Some(Target::Account(_, id)) if id == "machine-id"));
+        assert!(Target::for_machine(&machine, None, None).is_none());
+        credential.account = "different".into();
+        assert!(Target::for_machine(&machine, Some(&credential), None).is_none());
+        credential.account = "studio".into();
+        credential.origin = "https://other.invalid".into();
+        assert!(Target::for_machine(&machine, Some(&credential), None).is_none());
+    }
 
     #[test]
     fn color_values_and_port_samples_keep_inner_outer_order() {

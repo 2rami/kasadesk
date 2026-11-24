@@ -342,9 +342,29 @@ pub async fn machines(client: &reqwest::Client, c: &Credential, me: &str) -> Res
             continue;
         }
         let kind = DeviceKind::classify(name, &version);
-        out.push(Machine { label: name.to_string(), kind, model_id: version["model"].as_str().map(str::to_owned), kasanet: kasanet.clone(), fresh: true, account: Some(id.to_string()) });
+        let has_rgb = version["kasadesk_rgb"] == true &&
+            rgb_request(client, c, id, &json!({"op":"capability"})).await
+                .is_ok_and(|v| v["v"] == 1 && v["layout"] == "y60");
+        let rgb_owner = has_rgb.then(|| (c.origin.clone(), c.account.clone()));
+        out.push(Machine { rgb_owner, label: name.to_string(), kind, model_id: version["model"].as_str().map(str::to_owned), kasanet: kasanet.clone(), fresh: true, account: Some(id.to_string()) });
     }
     Ok(out)
+}
+
+pub async fn rgb_request(client: &reqwest::Client, c: &Credential, machine: &str, request: &Value) -> anyhow::Result<Value> {
+    anyhow::ensure!(
+        (8..=128).contains(&machine.len()) && machine.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
+        "잘못된 계정 기기 ID"
+    );
+    let url = format!("{}/relay/account/m/~{machine}/kasadesk/rgb", c.origin);
+    let mut response = client.post(url).bearer_auth(&c.token).json(request).send().await?;
+    anyhow::ensure!(response.status().is_success(), "계정 RGB 응답 {}", response.status());
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(bytes.len() + chunk.len() <= 400_000, "RGB 응답이 너무 커요");
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 async fn get_json(client: &reqwest::Client, c: &Credential, path: &str) -> Option<Value> {

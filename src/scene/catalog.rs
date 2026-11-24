@@ -115,7 +115,7 @@ impl Catalog {
     }
 
     pub fn kind(&self, machine: &Machine) -> DeviceKind {
-        if self.binding(machine, "case").is_some() {
+        if machine.rgb_owner.is_some() || self.binding(machine, "case").is_some() {
             return DeviceKind::Desktop;
         }
         let fallback = if !machine.kind.on_rack() && self.binding(machine, "display").is_some() { DeviceKind::Desktop } else { machine.kind };
@@ -130,7 +130,9 @@ impl Catalog {
     pub fn resolve(&self, machine: &Machine, model: Model) -> Option<usize> {
         let slot = match model { Model::Monitor => "display", Model::Tower => "case", _ => "computer" };
         let default_key = if model == Model::Monitor && self.kind(machine).on_rack() { "mini-display" } else { model.key() };
-        let key = self.binding(machine, slot).or_else(|| self.manifest["defaults"][default_key].as_str())?;
+        let key = self.binding(machine, slot)
+            .or_else(|| (model == Model::Tower && machine.rgb_owner.is_some()).then_some("hyte-y60"))
+            .or_else(|| self.manifest["defaults"][default_key].as_str())?;
         self.indices.get(key).copied().filter(|&i| self.assets[i].model == model)
     }
 }
@@ -221,7 +223,7 @@ mod tests {
         };
         let machine = Machine {
             label: "renamed machine".into(), kind: DeviceKind::Mini, model_id: None,
-            kasanet: json!({"id":"pc-id"}), fresh: false, account: None,
+            kasanet: json!({"id":"pc-id"}), fresh: false, account: None, rgb_owner: None,
         };
         assert_eq!(catalog.kind(&machine), DeviceKind::Desktop);
         assert_eq!(catalog.resolve(&machine, Model::Monitor), Some(0));

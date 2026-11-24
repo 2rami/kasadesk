@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use kasa_gridview::GridRenderer;
 use winit::keyboard::KeyCode;
 
-use super::{hex, parse_color, Color, Config, Fan, Session, Snapshot, Update, NAMES};
+use super::{hex, parse_color, Color, Target, Fan, Session, Snapshot, Update, NAMES};
 use crate::text::Ui;
 
 type Rect = (f32, f32, f32, f32);
@@ -56,6 +56,7 @@ pub struct Panel {
     pub generation: u64,
     session: Option<Session>,
     retry: Option<Instant>,
+    target: Option<Target>,
     error: Option<String>,
     cooling: bool,
     fan: usize,
@@ -71,35 +72,50 @@ pub struct Panel {
     upload: bool,
 }
 impl Panel {
+    fn set_target(&mut self, target: Option<Target>) -> bool {
+        if self.target == target {
+            return false;
+        }
+        self.session = None;
+        self.target = target;
+        self.generation = self.generation.wrapping_add(1);
+        self.data = None;
+        self.retry = None;
+        self.error = None;
+        self.pending = false;
+        self.submitted = None;
+        self.edited = false;
+        self.typing = false;
+        self.draft.clear();
+        self.hits.clear();
+        true
+    }
+
+    pub fn discard_stale(&mut self, route: Option<&Target>) {
+        if self.target.is_some() && self.target.as_ref() != route {
+            self.set_target(None);
+        }
+    }
+
     pub fn sync(
         &mut self,
         active: bool,
         rt: &tokio::runtime::Handle,
-        cfg: Option<&Arc<Config>>,
+        target: Option<Target>,
         notify: impl Fn(u64, Update) + Send + Sync + 'static,
     ) -> bool {
-        if !active {
-            let changed = self.session.is_some() || self.data.is_some() || self.error.is_some();
-            if changed {
-                self.generation = self.generation.wrapping_add(1);
-            }
-            self.session = None;
-            self.data = None;
-            self.error = None;
-            self.retry = None;
-            self.pending = false;
-            return changed;
-        }
+        let changed = self.set_target(target.filter(|_| active));
+        if self.target.is_none() { return changed; }
         if self.session.is_none() && self.retry.is_none_or(|t| t <= Instant::now()) {
-            let Some(cfg) = cfg else { return false };
+            let Some(target) = self.target.clone() else { return false };
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             self.generation = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let generation = self.generation;
-            self.session = Some(Session::start(rt, cfg.clone(), move |u| notify(generation, u)));
+            self.session = Some(Session::start(rt, target, move |u| notify(generation, u)));
             self.retry = None;
             return true;
         }
-        false
+        changed
     }
     pub fn fan_index(&self) -> usize {
         self.fan
@@ -122,7 +138,7 @@ impl Panel {
         self.retry
     }
     pub fn receive(&mut self, generation: u64, update: Update) {
-        if generation != self.generation {
+        if generation != self.generation || self.target.is_none() {
             return;
         }
         match update.result {
@@ -281,7 +297,7 @@ impl Panel {
             outline(g, (r.0 - 2.0, r.1 - 2.0, r.2 + 4.0, r.3 + 4.0), 7.0, RAIN)
         }
     }
-    pub fn paint(&mut self, g: &mut GridRenderer, ui: &mut Ui, size: (f32, f32), available: bool) {
+    pub fn paint(&mut self, g: &mut GridRenderer, ui: &mut Ui, size: (f32, f32), available: bool, connection_hint: Option<&str>) {
         self.hits.clear();
         self.body = None;
         if !available {
@@ -329,6 +345,11 @@ impl Panel {
         let close = (x + w - pad - 25.0, y + if compact { 6.0 } else { 16.0 }, 26.0, 26.0);
         center(g, ui, close, "×", 19.0, MUTED, false);
         self.hit(g, close, Action::Close);
+        if let Some(hint) = connection_hint {
+            ui.draw(g,l,y+88.0,"RGB 연결",17.0,TEXT,true);
+            ui.draw(g,l,y+126.0,hint,12.0,MUTED,false);
+            return;
+        }
         let status = match (&self.data, &self.error) {
             (Some(s), _) if s.connected => "연결됨",
             (Some(_), _) => "허브 대기",

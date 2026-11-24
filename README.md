@@ -55,22 +55,18 @@ Windows에서 `%LOCALAPPDATA%/KasaDesk/Models`예요. `KASADESK_MODEL_DIR`을 �
 
 ## Y60 조명과 Kraken LCD
 
-RGB Control을 실행하는 PC에서 `python kasadesk_bridge.py install`을 한 번 실행해요.
-KasaDesk 컴퓨터에서 해당 PC로 비대화형 로그인이 되는 OpenSSH 별칭과 확인된 호스트 키를 준비한 뒤 페어링해요.
+Windows PC에서 카사텀에 로그인하고 RGB Control을 실행해요. 다른 기기의 KasaDesk에서 같은 카사계정으로 로그인하면
+계정 명부에서 여섯 팬이 배치된 Y60을 찾아요. 이 연결에는 RGB를 지원하는 카사텀 호스트·관문·KasaDesk가 필요해요.
 
-```sh
-python3 scripts/pair-rgb.py SSH별칭 카사넷기기ID
-```
+방에서 **본체나 본체 이름표**를 누르면 조명판이 열려요. 팬을 직접 누르면 그 팬이 선택돼요.
+**모니터나 기기 이름표**를 누르면 원격 화면이 열려요. 조명판은 왼쪽 위 **조명 · LCD** 또는 키보드 **L**로도 열 수 있어요.
+색상표나 6자리 HEX를 고른 뒤 **색 적용**을 누르면 실물 팬에 전달돼요. **효과 따르기**는 그 자리의 고정 색과 링별 색을 해제해요.
+**냉각 · LCD**에는 Kraken LCD 그림, 수온, 펌프와 선택한 팬 포트의 RPM, GPU 온도가 보여요. Tab과 Enter로 조작하고 Esc로 방에 돌아와요.
 
-이 PC의 `case`를 위의 `hyte-y60`에 연결하고 KasaDesk를 다시 열어요. 방 왼쪽 위의 **조명 · LCD**, 키보드 **L**,
-또는 케이스 안의 팬을 눌러요. 여섯 자리에서 색상표나 6자리 HEX로 색을 지정한 뒤 **색 적용**을 누르면 실물 팬에 전달돼요.
-**효과 따르기**는 그 자리의 고정 색과 링별 색을 해제해요. **냉각 · LCD**에는 Kraken LCD 그림, 수온, 펌프와 선택한 팬 포트의 RPM, GPU 온도가 보여요.
-Tab과 Enter로 조작하고 Esc로 방에 돌아와요.
-
-연결 설정은 모델 폴더와 나란한 `KasaDesk/rgb.json`에 저장돼요. 이 파일에는 브리지 토큰이 들어 있어요.
-연결은 페어링한 기기가 보이는 고르기 창이 활성화된 동안 SSH 표준 입출력으로 이루어져요.
-화면 보기 키의 권한과 RGB Control의 루프백 바인딩은 유지돼요. 격리 리그에서는 `KASADESK_RGB_CONFIG`에 명시한 설정만 사용해요.
-[RGB Control 연결과 권한 회수](https://github.com/2rami/rgb-control/blob/master/KasaDesk.md)
+SSH로 페어링한 기존 PC도 계속 사용할 수 있어요. 이 방식은 호스트에서 `python kasadesk_bridge.py install`을 실행하고
+KasaDesk에서 `python3 scripts/pair-rgb.py SSH별칭 카사넷기기ID`로 연결한 뒤 위의 기기 매핑에서 `case`에 `hyte-y60`을 지정해요.
+브리지 토큰은 로컬 `KasaDesk/rgb.json`에 저장돼요. 격리 실행에서는 `KASADESK_RGB_CONFIG`에 지정한 SSH 설정만 읽어요.
+[RGB Control SSH 연결과 권한 회수](https://github.com/2rami/rgb-control/blob/master/KasaDesk.md)
 
 ## 업데이트
 

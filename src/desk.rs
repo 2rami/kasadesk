@@ -71,6 +71,7 @@ struct Win {
     occluded: bool,
     room: Room,
     rgb: crate::rgb::Panel,
+    rgb_machine: Option<String>,
     preview: crate::preview::Previews,
     preview_pending: Arc<AtomicBool>,
     ui: Ui,
@@ -276,7 +277,7 @@ impl Desk {
         let mut win = Win {
             gpu, window, label, view: None, display: None, closed_since: None,
             cursor: (0.0, 0.0), occluded: false,
-            room: Room::default(), rgb:Default::default(), preview: Default::default(), preview_pending: Default::default(), ui: Ui::new(),
+            room: Room::default(), rgb:Default::default(), rgb_machine:None, preview: Default::default(), preview_pending: Default::default(), ui: Ui::new(),
         };
         if win.label.is_none() {
             win.room.reflow(win.logical(), &self.machines);
@@ -344,15 +345,22 @@ impl Desk {
             let pictures: Vec<_> = w.room.preview_targets().iter().filter_map(|&(i, _)| {
                 Some((i, w.preview.picture(self.machines.get(i)?)?))
             }).collect();
-            let index=w.room.rgb_index(&self.machines,self.rgb_config.as_deref());
-            let snap=w.rgb.data.clone();
+            let index = w.room.rgb_index(&self.machines, self.rgb_config.as_deref(), w.rgb_machine.as_deref());
+            let route = index.and_then(|i| crate::rgb::Target::for_machine(&self.machines[i], cred.as_ref(), self.rgb_config.as_ref()));
+            let hint = route.is_none().then_some(if cred.is_some() {
+                "집 PC의 카사텀과 RGB Control 연결을 확인하세요"
+            } else {
+                "집 PC와 같은 카사계정으로 로그인하세요"
+            });
+            w.rgb.discard_stale(route.as_ref());
+            let snap = w.rgb.data.clone();
             let painted = w.room.paint(&pictures, index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.fan_index())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, self.weather, |g, ui, size| {
-                if !w.rgb.open { login.paint_chip(g, ui, size.0, cred.as_ref()); }
+                if !w.rgb.open || cred.is_none() { login.paint_chip(g, ui, size.0, cred.as_ref()); }
                 #[cfg(windows)]
                 if let Some((version, rect)) = update.as_mut().filter(|_|!w.rgb.open) {
                     *rect = Some(paint_update(g, ui, size.0, version));
                 }
-                w.rgb.paint(g,ui,size,index.is_some() && !login.open);
+                w.rgb.paint(g, ui, size, index.is_some() && !login.open, hint);
                 login.paint_panel(g, ui, size);
             });
             if painted.is_ok() { self.test.presented_previews(&pictures); }
@@ -409,7 +417,8 @@ impl Desk {
                     self.quit_for_update = crate::update::install_now(true);
                     return;
                 }
-                let action = if w.rgb.open { Action::None } else { self.login.click(p, self.session.get().is_some()) };
+                let logged_in = self.session.get().is_some();
+                let action = if w.rgb.open && logged_in { Action::None } else { self.login.click(p, logged_in) };
                 if !matches!(action, Action::None) || self.login.open {
                     w.room.stop_navigation();
                     self.login_action(action);
@@ -420,11 +429,23 @@ impl Desk {
                 w.room.stop_navigation();
                 return;
             }
-            let rgb_index = w.room.rgb_index(&self.machines, self.rgb_config.as_deref());
+            let rgb_index = w.room.rgb_index(&self.machines, self.rgb_config.as_deref(), w.rgb_machine.as_deref());
             let left = matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. });
             if left && !w.rgb.open && w.room.on_weather_source(w.cursor) {
                 account::open_browser("https://open-meteo.com/");
                 return;
+            }
+            if left && !w.rgb.open && !w.rgb.clickable(w.cursor) && !w.room.pointer_on_page(self.machines.len()) {
+                if let Some(crate::scene::Pick::Case(index)) = w.room.pick(w.cursor) {
+                    let fan = w.room.fan_hit(index, w.cursor).unwrap_or(0);
+                    let route = crate::rgb::Target::for_machine(&self.machines[index], self.session.get().as_ref(), self.rgb_config.as_ref());
+                    w.rgb.discard_stale(route.as_ref());
+                    w.rgb_machine = Some(self.machines[index].label.clone());
+                    w.rgb.choose(fan);
+                    w.room.rgb_view(Some(index));
+                    w.window.request_redraw();
+                    return;
+                }
             }
             if let Some(index) = rgb_index {
                 if left {
@@ -438,6 +459,7 @@ impl Desk {
                         }
                     }
                     if was_open || touched || w.rgb.open {
+                        w.rgb_machine = w.rgb.open.then(|| self.machines[index].label.clone());
                         w.room.rgb_view(w.rgb.open.then_some(index));
                         w.window.request_redraw();
                         return;
@@ -564,6 +586,7 @@ impl Desk {
                         w.rgb.key(code, event.text.as_deref(), m.shift_key());
                     }
                     if !w.rgb.open {
+                        w.rgb_machine = None;
                         w.room.rgb_view(None);
                     }
                     w.window.request_redraw();
@@ -575,7 +598,8 @@ impl Desk {
             }
             if let Some(code) = code {
                 if code == KeyCode::KeyL && !event.repeat {
-                    if let Some(i) = w.room.rgb_index(&self.machines, self.rgb_config.as_deref()) {
+                    if let Some(i) = w.room.rgb_index(&self.machines, self.rgb_config.as_deref(), w.rgb_machine.as_deref()) {
+                        w.rgb_machine = Some(self.machines[i].label.clone());
                         w.rgb.choose(0);
                         w.room.rgb_view(Some(i));
                         w.window.request_redraw();
@@ -751,7 +775,7 @@ impl ApplicationHandler<Ev> for Desk {
                     (if m.fresh { path } else { format!("{path} · 지난 주소") }, up)
                 }).unzip();
                 let reflow = machines.len() != self.machines.len() || machines.iter().zip(&self.machines)
-                    .any(|(m, old)| m.label != old.label || m.kind != old.kind || m.model_id != old.model_id || m.kasanet.get("id") != old.kasanet.get("id"));
+                    .any(|(m, old)| m.label != old.label || m.kind != old.kind || m.model_id != old.model_id || m.rgb_owner != old.rgb_owner || m.kasanet.get("id") != old.kasanet.get("id"));
                 let redraw = reflow || paths != self.paths || live != self.live || app_alive != self.app_alive;
                 self.machines = machines;
                 self.paths = paths;
@@ -901,7 +925,9 @@ impl ApplicationHandler<Ev> for Desk {
             self.open(event_loop, Some(label));
         }
         for (&id, w) in self.windows.iter_mut().filter(|(_, w)| w.label.is_none()) {
-            let has_pc = w.room.rgb_index(&self.machines, self.rgb_config.as_deref()).is_some();
+            if !w.rgb.open { w.rgb_machine = None; }
+            let index = w.room.rgb_index(&self.machines, self.rgb_config.as_deref(), w.rgb_machine.as_deref());
+            let has_pc = index.is_some();
             if !has_pc || self.login.open {
                 if w.rgb.open {
                     w.rgb.close();
@@ -911,7 +937,8 @@ impl ApplicationHandler<Ev> for Desk {
             }
             let active = has_pc && !self.login.open && (self.focused == Some(id) || self.test.drives_picker());
             let rgb_proxy = self.proxy.clone();
-            if w.rgb.sync(active, &self.net.handle, self.rgb_config.as_ref(), move |gen, msg| {
+            let route = index.filter(|_|active).and_then(|i| crate::rgb::Target::for_machine(&self.machines[i],self.session.get().as_ref(),self.rgb_config.as_ref()));
+            if w.rgb.sync(active, &self.net.handle, route, move |gen, msg| {
                 let _ = rgb_proxy.send_event(Ev::Rgb(id, gen, msg));
             }) {
                 w.window.request_redraw();

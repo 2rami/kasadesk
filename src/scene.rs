@@ -239,6 +239,13 @@ impl Part {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick { Screen(usize), Case(usize) }
+
+impl Pick {
+    fn index(self) -> usize { match self { Self::Screen(i) | Self::Case(i) => i } }
+}
+
 pub struct Layout {
     window: Point,
     plan: Plan,
@@ -318,7 +325,7 @@ impl Layout {
         self.devices.iter().position(|d| d.index == index)
     }
 
-    fn hit(&self, frame: &Frame, pointer: Point) -> Option<usize> {
+    fn pick(&self, frame: &Frame, pointer: Point) -> Option<Pick> {
         let ray = frame.ray(pointer)?;
         self.parts.iter().filter_map(|part| {
             let device = &self.devices[part.device];
@@ -327,7 +334,8 @@ impl Layout {
                 None if part.main && device.preview_visible => part.screen_box(),
                 None => return None,
             };
-            ray.hit_box(part.position+lo, part.position+hi).map(|t| (t, device.index))
+            let pick = if part.model == Model::Tower { Pick::Case(device.index) } else { Pick::Screen(device.index) };
+            ray.hit_box(part.position+lo, part.position+hi).map(|t| (t, pick))
         }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, index)| index)
     }
 
@@ -396,7 +404,7 @@ pub struct Room {
     painted_at: Option<Instant>,
     dive: Option<Dive>,
     arrived: Option<usize>,
-    tags: Vec<(Rect, usize)>,
+    tags: Vec<(Rect, Pick)>,
     weather_link: Option<Rect>,
     preview_targets: Vec<(usize, f32)>,
 }
@@ -490,6 +498,10 @@ impl Room {
     }
 
     fn hit_at(&self, p: Point) -> Option<usize> {
+        self.pick(p).map(Pick::index)
+    }
+
+    pub fn pick(&self, p: Point) -> Option<Pick> {
         if self.dive.is_some() {
             return None;
         }
@@ -497,7 +509,7 @@ impl Room {
         if let Some(&(_, index)) = self.tags.iter().find(|(r, _)| contains(*r, p)) {
             return Some(index);
         }
-        self.layout.as_ref()?.hit(&self.home_frame()?, p)
+        self.layout.as_ref()?.pick(&self.home_frame()?, p)
     }
 
     fn select(&mut self, selected: Option<usize>) -> bool {
@@ -548,7 +560,7 @@ impl Room {
     }
 
     pub fn hit(&self) -> Option<usize> {
-        self.hit_at(self.pointer?)
+        match self.pick(self.pointer?)? { Pick::Screen(i) => Some(i), Pick::Case(_) => None }
     }
 
     /// 그 기기로 다가가기 시작한다 — 다 다가가면 `take_arrival` 이 돌려준다.
@@ -621,26 +633,23 @@ impl Room {
         self.select(Some(found))
     }
 
-    pub fn rgb_index(&self, machines: &[Machine], config: Option<&crate::rgb::Config>) -> Option<usize> {
-        let config = config?;
+    pub fn rgb_index(&self, machines: &[Machine], config: Option<&crate::rgb::Config>, chosen: Option<&str>) -> Option<usize> {
         let layout = self.layout.as_ref()?;
         if self.dive.is_some() {
             return None;
         }
-        let tower = layout.parts.iter().find(|p| {
-            p.model == Model::Tower
-                && catalog::library().is_y60(p.asset)
-                && p.bounds.is_some()
-                && machines.get(layout.devices[p.device].index).is_some_and(|m| config.matches(m))
-        })?;
-        Some(layout.devices[tower.device].index)
+        let towers = layout.parts.iter().filter(|p| p.model == Model::Tower && catalog::library().is_y60(p.asset))
+            .map(|p| layout.devices[p.device].index);
+        if let Some(label) = chosen { return towers.into_iter().find(|&i| machines[i].label == label); }
+        towers.clone().find(|&i| machines[i].rgb_owner.is_some() || config.is_some_and(|c| c.matches(&machines[i])))
+            .or_else(|| towers.into_iter().next())
     }
 
     pub fn fan_hit(&self, index: usize, p: Point) -> Option<usize> {
         let layout = self.layout.as_ref()?;
         let part = layout.parts.iter().find(|p| p.model == Model::Tower && layout.devices[p.device].index == index)?;
         let frame = self.home_frame()?;
-        if layout.hit(&frame, p) != Some(index) {
+        if layout.pick(&frame, p) != Some(Pick::Case(index)) {
             return None;
         }
         let ray = frame.ray(p)?;
@@ -818,23 +827,28 @@ impl Room {
         if calm > 0.0 && editing.is_none() {
             // 고른 기기 먼저 제자리에, 나머지는 겹치면 위로 비켜 쌓는다 — 이름을 접지 않는다.
             let mut anchors: Vec<_> = layout.anchors(&home).into_iter()
-                .map(|(i, p)| (i, p, machines[i].label.as_str())).collect();
+                .map(|(i, p)| (Pick::Screen(i), p, machines[i].label.as_str())).collect();
             for part in layout.parts.iter().filter(|p| p.model == Model::Tower) {
                 if let Some(asset) = part.asset() {
                     let where_ = if asset.geometry.is_none() { Vec3::Y * 0.5 } else { part.top() };
                     let Some(at) = home.visible(part.position + where_) else { continue };
-                    anchors.push((layout.devices[part.device].index, at, &asset.name));
+                    anchors.push((Pick::Case(layout.devices[part.device].index), at, &asset.name));
                 }
             }
-            anchors.sort_by(|a, b| (Some(b.0) == self.selected).cmp(&(Some(a.0) == self.selected)).then(b.1.y.total_cmp(&a.1.y)));
-            let mut placed: Vec<(Rect, usize, Vec2, bool, Tag)> = Vec::new();
-            for &(index, at, name) in &anchors {
+            anchors.sort_by(|a, b| (Some(b.0.index()) == self.selected).cmp(&(Some(a.0.index()) == self.selected)).then(b.1.y.total_cmp(&a.1.y)));
+            let mut placed: Vec<(Rect, Pick, Vec2, bool, Tag)> = Vec::new();
+            for &(pick, at, name) in &anchors {
+                let index = pick.index();
                 let focus = self.selected == Some(index);
-                let product = if name == machines[index].label {
-                    catalog::library().description(&machines[index]).or_else(||
-                        layout.device_of(index).and_then(|i| layout.computer_asset(i)).map(|a| a.name.as_str()))
-                } else { None };
-                let tag = Tag { name, product, path: &paths[index], live: live.get(index).copied().unwrap_or(false) };
+                let (product, path, connected) = match pick {
+                    Pick::Screen(_) => {
+                        let product = catalog::library().description(&machines[index]).or_else(||
+                            layout.device_of(index).and_then(|i| layout.computer_asset(i)).map(|a| a.name.as_str()));
+                        (product, paths[index].as_str(), live.get(index).copied().unwrap_or(false))
+                    }
+                    Pick::Case(_) => (None, "본체 조명 · LCD", rgb.is_some_and(|(i, snapshot)| i == index && snapshot.connected)),
+                };
+                let tag = Tag { name, product, path, live: connected };
                 let (w, h) = tag.size(g, ui, focus);
                 let left = (at.x - w / 2.0).clamp(4.0, (width - w - 4.0).max(4.0));
                 let mut rect = (left, at.y - h - 8.0, w, h);
@@ -842,7 +856,7 @@ impl Room {
                     let Some(top) = placed.iter().filter(|(r, ..)| overlaps(*r, rect)).map(|(r, ..)| r.1).min_by(f32::total_cmp) else { break };
                     rect.1 = top - h - 4.0;
                 }
-                placed.push((rect, index, at, focus, tag));
+                placed.push((rect, pick, at, focus, tag));
             }
             placed.sort_by_key(|p| p.3);
             // 줄을 먼저 다 긋는다 — 위로 비켜 선 이름표의 줄이 아래 이름표 글자를 지우지 않게.
@@ -1060,7 +1074,7 @@ mod tests {
             kind,
             kasanet: serde_json::Value::Null,
             fresh: false,
-            account: None,
+            account: None, rgb_owner: None,
         }).collect()
     }
 
@@ -1120,7 +1134,7 @@ mod tests {
                     let frame = layout.home.with_look(look).frame(window);
                     for i in 0..PAGE {
                         let p = center(&layout, &frame, i);
-                        assert_eq!(layout.hit(&frame, p), Some(i), "{kind:?} {window:?} {look:?} {p:?}");
+                        assert_eq!(layout.pick(&frame, p).map(Pick::index), Some(i), "{kind:?} {window:?} {look:?} {p:?}");
                     }
                 }
             }
@@ -1176,12 +1190,35 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_tower_or_its_tag_does_not_open_the_monitor() {
+        let mut room = Room::default();
+        room.reflow((1280.0, 800.0), &machines(&[DeviceKind::Desktop]));
+        let layout = room.layout.as_mut().unwrap();
+        attach_fixture_geometry(layout);
+        let frame = layout.home.frame(layout.window);
+        let projected = |model| {
+            let part = layout.parts.iter().find(|part| part.model == model).unwrap();
+            let at = frame.project(part.position + part.bounds.unwrap().0);
+            (at.x, at.y)
+        };
+        let tower = projected(Model::Tower);
+        let monitor = projected(Model::Monitor);
+        room.tags = vec![((40.0, 120.0, 80.0, 30.0), Pick::Case(0)), ((200.0, 120.0, 80.0, 30.0), Pick::Screen(0))];
+        for (point, wanted) in [(tower, Pick::Case(0)), ((60.0, 130.0), Pick::Case(0)),
+            (monitor, Pick::Screen(0)), ((220.0, 130.0), Pick::Screen(0))] {
+            room.pointer(Some(point));
+            assert_eq!(room.pick(point), Some(wanted));
+            assert_eq!(room.hit(), (wanted == Pick::Screen(0)).then_some(0));
+        }
+    }
+
+    #[test]
     fn a_name_only_part_has_no_invisible_pick_volume() {
         let machines = machines(&[DeviceKind::Laptop]);
         let mut layout = Layout::new((800.0, 600.0), &machines, 0);
         layout.parts[0].bounds = None;
         let frame = layout.home.frame(layout.window);
-        assert_eq!(layout.hit(&frame, center(&layout, &frame, 0)), None);
+        assert_eq!(layout.pick(&frame, center(&layout, &frame, 0)), None);
         assert_eq!(layout.anchors(&frame).len(), 1);
     }
 
