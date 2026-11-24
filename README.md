@@ -74,7 +74,7 @@ Tab과 Enter로 조작하고 Esc로 방에 돌아와요.
 
 카사텀과 같은 길이에요. 피드는 이 저장소의 Pages 에서 나가고, 판마다 이 앱 전용 EdDSA 키로 서명해요.
 
-- 맥: 번들 안 Sparkle 이 [`appcast.xml`](https://2rami.github.io/kasadesk/appcast.xml)을 한 시간마다 보고, 새 판을 받아 두었다가 끌 때 갈아 끼워요.
+- 맥: 번들 안 Sparkle 이 [`appcast.xml`](https://2rami.github.io/kasadesk/appcast.xml)을 한 시간마다 보고, 새 판을 받아 두었다가 끌 때 갈아 끼워요. 앱 메뉴 「업데이트 확인…」을 누르면 끌 때까지 기다리지 않고 지금 받아 설치해요.
 - Windows: 앱이 [`appcast-win.xml`](https://2rami.github.io/kasadesk/appcast-win.xml)을 한 시간마다 보고, 새 판 MSI 를 받아 서명을
   확인한 뒤 고르기 화면에 「새 판」 칩을 띄워요. 칩을 누르거나 앱을 끄면 깔아요.
 

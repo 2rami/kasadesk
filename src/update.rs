@@ -1,5 +1,5 @@
 //! 자동 업데이트 — 카사텀과 같은 길. 맥은 번들 안 Sparkle 이 `Info.plist` 의 피드(`SUFeedURL`)를 보고 받아 두었다가 끌 때
-//! 갈아 끼운다. Windows 는 이 파일이 피드(`appcast-win.xml`)를 한 시간마다 보고, 새 판 MSI 를 받아 EdDSA 서명을 확인한 뒤
+//! 갈아 끼운다. 앱 메뉴 「업데이트 확인…」은 끌 때까지 기다리지 않고 지금 묻는다. Windows 는 이 파일이 피드(`appcast-win.xml`)를 한 시간마다 보고, 새 판 MSI 를 받아 EdDSA 서명을 확인한 뒤
 //! 고르기 화면에 「새 판」 칩을 띄운다 — 누르거나 앱을 끄면 설치한다.
 //! 격리 실행(`KASATERM_VIEW_STATE`·`KASATERM_VIEW_KEY`)과 설치본이 아닌 실행(cargo 산출물)은 업데이트하지 않는다.
 
@@ -42,8 +42,48 @@ pub fn start() {
     };
     if controller.is_null() {
         eprintln!("[kasadesk] Sparkle 업데이터를 못 세운다");
-    } else {
-        eprintln!("[kasadesk] Sparkle 업데이터 시작");
+        return;
+    }
+    eprintln!("[kasadesk] Sparkle 업데이터 시작");
+    add_check_item(controller);
+}
+
+/// 앱 메뉴의 「KasaDesk에 관하여」 바로 아래에 「업데이트 확인…」을 단다. 컨트롤러의 `checkForUpdates:` 로 곧장 이어서
+/// 받아 둔 판이 있으면 지금 설치·재시작을 묻고, 없으면 피드를 보고 「최신」까지 Sparkle 이 안내한다.
+#[cfg(target_os = "macos")]
+fn add_check_item(controller: *mut objc2::runtime::AnyObject) {
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::{msg_send, sel};
+
+    let (Some(app_class), Some(item_class), Some(string)) =
+        (AnyClass::get(c"NSApplication"), AnyClass::get(c"NSMenuItem"), AnyClass::get(c"NSString"))
+    else {
+        return;
+    };
+    // SAFETY: 주 스레드(winit 의 resumed)에서 winit 이 세운 기본 메뉴에 항목 하나를 끼운다. 항목은 메뉴가 쥐고, 표적인
+    // 컨트롤러는 앱이 끝날 때까지 놓지 않는다.
+    unsafe {
+        let app: *mut AnyObject = msg_send![app_class, sharedApplication];
+        let main: *mut AnyObject = msg_send![app, mainMenu];
+        if main.is_null() {
+            return;
+        }
+        let count: isize = msg_send![main, numberOfItems];
+        if count < 1 {
+            return;
+        }
+        let first: *mut AnyObject = msg_send![main, itemAtIndex: 0isize];
+        let menu: *mut AnyObject = msg_send![first, submenu];
+        if menu.is_null() {
+            return;
+        }
+        let title: *mut AnyObject = msg_send![string, stringWithUTF8String: c"업데이트 확인…".as_ptr()];
+        let key: *mut AnyObject = msg_send![string, stringWithUTF8String: c"".as_ptr()];
+        let made: *mut AnyObject = msg_send![item_class, alloc];
+        let item: *mut AnyObject = msg_send![made, initWithTitle: title, action: sel!(checkForUpdates:), keyEquivalent: key];
+        let _: () = msg_send![item, setTarget: controller];
+        let at: isize = msg_send![menu, numberOfItems];
+        let _: () = msg_send![menu, insertItem: item, atIndex: at.min(1)];
     }
 }
 
