@@ -27,11 +27,13 @@ struct Instance {
 struct Scene {
     clip_from_world: [[f32; 4]; 4],
     sun_clip: [[f32; 4]; 4],
-    eye: [f32; 4],
+    world_from_clip: [[f32; 4]; 4],
     camera: [f32; 4],
     lighting: [f32; 4],
     viewport: [f32; 4],
     bench: [f32; 4],
+    landscape: [f32; 4],
+    windows: [f32; 4],
     preview_rect: [f32; 4],
     fan_colors: [[f32; 4]; 12],
 }
@@ -76,7 +78,7 @@ impl RoomGpu {
             label: Some("KasaDesk room shader"),
             source: wgpu::ShaderSource::Wgsl(concat!(include_str!("showers.wgsl"), "\n", include_str!("room.wgsl")).into()),
         });
-        let plate = image::load_from_memory_with_format(include_bytes!("../../assets/river-sunshower.jpg"), image::ImageFormat::Jpeg)
+        let plate = image::load_from_memory_with_format(include_bytes!("../../assets/river-panorama.jpg"), image::ImageFormat::Jpeg)
             .expect("embedded riverside panorama").into_rgba8();
         let texture = device.create_texture_with_data(queue, &wgpu::TextureDescriptor {
             label: Some("KasaDesk riverside horizon"),
@@ -331,6 +333,8 @@ impl RoomGpu {
         let left = left - layout.plan.rack_width();
         let half = (right - left) * 0.5 + 8.0;
         let target = vec3((left + right) * 0.5, mesh::DESK_Y, 0.0);
+        let (room_lo, room_hi) = layout.plan.limits();
+        let landscape_radius = (half * 3.0).max(144.0);
         let sun = vec3(0.76, 0.45, -0.42).normalize();
         let sun_view = Mat4::look_at_rh(target + sun * (half + 20.0), target, Vec3::Y);
         let sun_clip = Mat4::orthographic_rh(-half, half, -half, half, 0.1, 2.0 * half + 45.0) * sun_view;
@@ -364,12 +368,14 @@ impl RoomGpu {
         queue.write_buffer(&self.scene, 0, bytemuck::bytes_of(&Scene {
             clip_from_world: frame.clip_from_world.to_cols_array_2d(),
             sun_clip: sun_clip.to_cols_array_2d(),
-            eye: frame.eye.extend(0.0).to_array(),
+            world_from_clip: frame.world_from_clip.to_cols_array_2d(),
             camera: frame.camera.extend(1.0).to_array(),
             lighting: [frame.day, frame.dusk, frame.indoor, frame.rain_time],
             viewport: [size.width as f32, size.height as f32, preview_size.0 as f32, preview_size.1 as f32],
             preview_rect, fan_colors:rgb.map_or([[0.0;4];12],|(_,s)|s.lights()),
-            bench: [left, right, mesh::DESK_Y, layout.plan.limits().0.z],
+            bench: [left, right, mesh::DESK_Y, room_lo.z],
+            landscape: [target.x, 12.0, room_lo.z, landscape_radius],
+            windows: [room_lo.x, room_hi.x, room_hi.y, layout.plan.side_window_end()],
         }));
         // 방 한 칸 + 모형 종류마다 줄 세운 기기 자리.
         let mut data = vec![Instance { position: [0.0; 3], highlight: 0.0, glow: 0.0, preview: 0.0, rgb: 0.0 }];
@@ -440,8 +446,6 @@ impl RoomGpu {
         pass.set_vertex_buffer(1, instances.slice(..));
         pass.set_bind_group(0, &self.binding, &[]);
         pass.set_bind_group(1, &self.shadow_binding, &[]);
-        pass.set_pipeline(&self.backdrop);
-        pass.draw(0..3, 0..1);
         pass.set_pipeline(&self.solid);
         pass.draw(0..*room_count, 0..1);
         pass.set_vertex_buffer(0, self.products.slice(..));
@@ -450,6 +454,9 @@ impl RoomGpu {
                 pass.draw(product.body.clone(), range.clone());
             }
         }
+        // Let opaque geometry reject covered pixels before evaluating the outdoor weather.
+        pass.set_pipeline(&self.backdrop);
+        pass.draw(0..3, 0..1);
         pass.set_pipeline(&self.glaze);
         for (product, range) in self.ranges.iter().zip(&ranges) {
             if !range.is_empty() {

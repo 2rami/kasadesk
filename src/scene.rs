@@ -75,7 +75,7 @@ impl View {
         let projection = Mat4::perspective_rh(FOV_Y, aspect, 0.09, distance + 400.0);
         let clip_from_world = projection * view;
         let (day, dusk, indoor) = gpu::daylight();
-        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), eye, camera: self.target + eye * distance, day, dusk, indoor, rain_time: 0.0 }
+        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), camera: self.target + eye * distance, day, dusk, indoor, rain_time: 0.0 }
     }
 }
 
@@ -83,7 +83,6 @@ pub struct Frame {
     window: Point,
     clip_from_world: Mat4,
     world_from_clip: Mat4,
-    eye: Vec3,
     camera: Vec3,
     day: f32,
     dusk: f32,
@@ -801,7 +800,7 @@ impl Room {
             ui.draw(g, width * 0.5 - pw / 2.0, left.1 + 7.0, &pages, 12.0, MUTE, false);
         }
         let travel = [("WASD", "이동"), ("휠", "앞뒤"), ("우클릭", "시선"), ("Home", "복귀"),
-            ("R", if self.rain_paused { "비 재생" } else { "비 멈춤" })];
+            ("R", if self.rain_paused { "날씨 재생" } else { "날씨 멈춤" })];
         let fan_controls = [("클릭", "팬 선택"), ("Tab", "이동"), ("Esc", "닫기")];
         let controls = if editing.is_some() { fan_controls.as_slice() } else { travel.as_slice() };
         let mut control_x = width - PAD;
@@ -1040,8 +1039,11 @@ mod tests {
         room.drag(Some((100.0,200.0)));
         room.pointer(Some((400.0,250.0)));
         let turn = room.home_frame().unwrap();
-        assert!(turn.camera.distance(dolly.camera) < 0.001 && turn.eye.distance(dolly.eye) > 0.2);
-        assert!(turn.visible(turn.camera+turn.eye).is_none());
+        let center = (640.0, 400.0);
+        let before = dolly.ray(center).unwrap().direction;
+        let after = turn.ray(center).unwrap().direction;
+        assert!(turn.camera.distance(dolly.camera) < 0.001 && after.distance(before) > 0.2);
+        assert!(turn.visible(turn.camera - after).is_none());
         room.stop_navigation();
         room.travel_key(KeyCode::Home,true);
         assert!(room.free.is_none() && room.dragging.is_none());

@@ -120,6 +120,10 @@ impl Plan {
         (vec3(left - 9.0, 0.0, -9.0), vec3(self.desk.1 + 9.0, 19.0 + span * 0.5, 34.0 + span * 1.4))
     }
 
+    pub fn side_window_end(&self) -> f32 {
+        self.limits().0.z + 17.0
+    }
+
 }
 
 #[derive(Default)]
@@ -422,13 +426,23 @@ fn room(m: &mut Mesh, p: &Plan) {
     let (cx, cz) = ((lo.x+hi.x)*0.5, (lo.z+hi.z)*0.5);
     let (w,d) = (hi.x-lo.x, hi.z-lo.z);
     m.part([cx,-0.14,cz], [w,0.28,d], 0.08, [145,165,185], mat::DECK);
+    let side_end = p.side_window_end();
+    let wall_depth = hi.z - side_end;
+    let wall_z = side_end + wall_depth * 0.5;
     for x in [lo.x,hi.x] {
-        m.part([x,hi.y*0.5,cz], [0.35,hi.y,d], 0.1, [159,178,196], mat::SOLID);
-        m.part([x,4.0,cz], [0.48,7.8,d], 0.12, GRAPHITE, mat::SOLID);
-        for i in 0..8 {
-            let z = lo.z + (i as f32+0.5)*d/8.0;
+        m.part([x,hi.y*0.5,wall_z], [0.35,hi.y,wall_depth], 0.1, [159,178,196], mat::SOLID);
+        m.part([x,4.0,wall_z], [0.48,7.8,wall_depth], 0.12, GRAPHITE, mat::SOLID);
+        for i in 0..6 {
+            let z = side_end + (i as f32+0.5)*wall_depth/6.0;
             m.part([x,hi.y*0.5,z], [0.9,hi.y,0.42], 0.08, BIRCH, mat::WOOD);
             m.part([x,8.2,z], [1.0,0.15,2.8], 0.06, CERAMIC, mat::LAMP);
+        }
+        let window_depth = side_end - lo.z;
+        let side_mid = lo.z + window_depth * 0.5;
+        m.part([x,1.45,side_mid], [0.65,2.9,window_depth], 0.10, GRAPHITE, mat::SOLID);
+        m.part([x,2.98,side_mid], [0.92,0.17,window_depth], 0.07, BIRCH, mat::WOOD);
+        for z in [lo.z, side_mid, side_end] {
+            m.part([x,hi.y*0.5,z], [0.48,hi.y,0.23], 0.05, GRAPHITE, mat::SOLID);
         }
     }
     m.part([cx,hi.y*0.5,hi.z], [w,hi.y,0.40], 0.15, [126,153,180], mat::SOLID);

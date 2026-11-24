@@ -3,11 +3,13 @@
 struct Scene {
     clip_from_world: mat4x4<f32>,
     sun_clip: mat4x4<f32>,
-    eye: vec4<f32>,
+    world_from_clip: mat4x4<f32>,
     camera: vec4<f32>,
     lighting: vec4<f32>,
     viewport: vec4<f32>,
     bench: vec4<f32>,
+    landscape: vec4<f32>,
+    windows: vec4<f32>,
     preview_rect: vec4<f32>,
     fan_colors: array<vec4<f32>,12>,
 };
@@ -31,47 +33,91 @@ fn project_sky(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(vertices[i], 1.0, 1.0);
 }
 
-fn river_sky(uv: vec2<f32>) -> vec3<f32> {
-    return textureSampleLevel(panorama, linear_sampler, uv, 0.0).rgb;
+fn panorama_uv(direction: vec3f) -> vec2f {
+    let horizontal = length(direction.xz);
+    let heading = atan2(direction.x, -direction.z);
+    let elevation = atan2(direction.y, max(horizontal, 0.00001));
+    // Allocate more texels to the river-facing part of the painting and less to the rear and poles.
+    let lon = heading + 0.62 * sin(heading);
+    let lat = elevation + 0.27 * sin(2.0 * elevation) + 0.36 * cos(elevation);
+    return vec2f(0.5 + lon * (0.5 / 3.14159265), 0.5 - lat / 3.14159265);
+}
+
+fn river_sky(coord: vec2f) -> vec3f {
+    let uv = vec2f(fract(coord.x), clamp(coord.y, 0.0, 1.0));
+    let color = textureSampleLevel(panorama, linear_sampler, uv, 0.0).rgb;
+    let seam = min(uv.x, 1.0 - uv.x);
+    if seam < 0.018 {
+        // The painted borders meet behind the room, outside the primary vista.
+        let other_side = textureSampleLevel(panorama, linear_sampler, vec2f(1.0 - uv.x, uv.y), 0.0).rgb;
+        return mix((color + other_side) * 0.5, color, smoothstep(0.0, 0.018, seam));
+    }
+    return color;
+}
+
+fn landscape_direction(ray: vec3f) -> vec3f {
+    let offset = scene.camera.xyz - scene.landscape.xyz;
+    let radius = scene.landscape.w;
+    // Wide room layouts and portrait windows can put the camera farther from the glass.
+    // Keep its projection inside the sphere so every ray has a forward intersection.
+    let scaled = offset / max(radius, length(offset) / 0.55);
+    let along = dot(scaled, ray);
+    let distance = sqrt(1.0 - dot(scaled, scaled) + along * along) - along;
+    let city = scaled + ray * distance;
+    return mix(city, ray, smoothstep(0.03, 0.31, ray.y));
+}
+
+fn moving_clouds(uv: vec2f) -> vec2f {
+    let phase = scene.lighting.w * (6.2831853 / 44.0);
+    let amount = (1.0 - smoothstep(0.33, 0.47, uv.y)) * smoothstep(0.04, 0.18, uv.y);
+    let drift = vec2f(sin(phase) * 0.010, sin(phase + uv.x * 6.2831853) * 0.0025);
+    return uv + drift * amount;
+}
+
+fn rain_on_glass(ray: vec3f) -> vec3f {
+    let camera = scene.camera.xyz;
+    let z = scene.bench.w;
+    if ray.z < -0.0001 {
+        let distance = (z - camera.z) / ray.z;
+        let hit = camera + ray * distance;
+        if distance > 0.0 && hit.x >= scene.windows.x && hit.x <= scene.windows.y && hit.y <= scene.windows.z {
+            return vec3f(hit.x, hit.y, 1.0);
+        }
+    }
+    if abs(ray.x) > 0.0001 {
+        let edge = select(scene.windows.x, scene.windows.y, ray.x > 0.0);
+        let distance = (edge - camera.x) / ray.x;
+        let hit = camera + ray * distance;
+        if distance > 0.0 && hit.z >= z && hit.z <= scene.windows.w && hit.y <= scene.windows.z {
+            // Rain coordinates continue around the corner so the wind has the same direction.
+            return vec3f(edge + sign(ray.x) * (hit.z - z), hit.y, 1.0);
+        }
+    }
+    return vec3f(0.0);
 }
 
 @fragment
 fn horizon(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = pixel.xy / scene.viewport.xy;
-    let dimensions = vec2<f32>(textureDimensions(panorama));
-    let aspect = (scene.viewport.x / scene.viewport.y) / (dimensions.x / dimensions.y);
-    let cover = min(vec2<f32>(aspect, 1.0 / aspect), vec2<f32>(1.0));
-    let aspect_ratio = scene.viewport.x / scene.viewport.y;
-    let right = normalize(cross(vec3<f32>(0.0,1.0,0.0), scene.eye.xyz));
-    let up = cross(scene.eye.xyz,right);
-    let ray = normalize(-scene.eye.xyz + (uv.x-0.5)*0.799*aspect_ratio*right + (0.5-uv.y)*0.799*up);
-    let default_eye = vec3<f32>(sin(0.13)*cos(0.22), sin(0.22), cos(0.13)*cos(0.22));
-    let default_right = normalize(cross(vec3<f32>(0.0,1.0,0.0),default_eye));
-    let depth = dot(ray,-default_eye);
-    let xy = vec2<f32>(dot(ray,default_right)/aspect_ratio, -dot(ray,cross(default_eye,default_right)));
-    let coord = 0.5 + xy / (0.799 * max(depth,0.01)) * cover * 0.96;
-    let edge = min(coord,1.0-coord);
-    let inside = smoothstep(-0.29, -0.025, min(edge.x,edge.y)) * smoothstep(0.0,0.2,depth);
-    // A reflected margin carries the cloud texture into the upper sky when looking up close.
-    let sky_uv = 1.0 - abs(fract(coord * 0.5) * 2.0 - 1.0);
-    let clear = vec3f(0.27, 0.47, 0.65) + 0.20 * max(0.0, -ray.y);
-    var photo = mix(clear, river_sky(sky_uv), inside);
-    // The weather is anchored outside the sill, so a turn or a step never drags it across a device.
-    if ray.z < -0.03 {
-        let distance_to_glass = (scene.bench.w - scene.camera.z) / ray.z;
-        if distance_to_glass > 0.0 {
-            let glass = scene.camera.xy + ray.xy * distance_to_glass;
-            let p = vec2f(glass.x, 3.07 - glass.y) * 31.0;
-            let t = scene.lighting.w;
-            let rain = falling(p, t, -0.18, 0.42, 0.08) + falling(p, t, -0.18, 0.42, 0.52)
-                     + falling(p, t, -0.18, 0.42, 0.93);
-            let spray = impact(p, t, 0.52, -0.18, 23.0);
-            let drop = bead(p * 0.74, 0.12, 47.0);
-            let wet = clamp(spray * 0.65 + rain * 0.66 + drop.y * 0.56, 0.0, 0.85);
-            let refracted = river_sky(clamp(sky_uv + vec2f(drop.y, -drop.x) * 0.011, vec2f(0.0), vec2f(1.0)));
-            photo = mix(photo, refracted, inside * min(1.0, 5.0 * (drop.x + drop.y)));
-            photo = mix(photo * (1.0 - drop.x), vec3f(0.84, 0.93, 1.0), wet);
+    let ndc = uv * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0);
+    let point = scene.world_from_clip * vec4f(ndc, 0.95, 1.0);
+    let ray = normalize(point.xyz / point.w - scene.camera.xyz);
+    let sky_uv = moving_clouds(panorama_uv(landscape_direction(ray)));
+    var photo = river_sky(sky_uv);
+    let glass = rain_on_glass(ray);
+    if glass.z > 0.0 {
+        let p = vec2f(glass.x, 3.07 - glass.y) * 31.0;
+        let t = scene.lighting.w;
+        let rain = falling(p, t, -0.18, 0.42, 0.08) + falling(p, t, -0.18, 0.42, 0.52)
+                 + falling(p, t, -0.18, 0.42, 0.93);
+        let spray = impact(p, t, 0.52, -0.18, 23.0);
+        let drop = bead(p * 0.74, 0.12, 47.0);
+        let wet = clamp(spray * 0.65 + rain * 0.66 + drop.y * 0.56, 0.0, 0.85);
+        if drop.x + drop.y > 0.0 {
+            let refracted = river_sky(sky_uv + vec2f(drop.y, -drop.x) * 0.004);
+            photo = mix(photo, refracted, min(1.0, 5.0 * (drop.x + drop.y)));
         }
+        photo = mix(photo * (1.0 - drop.x), vec3f(0.84, 0.93, 1.0), wet);
     }
     let night = vec3f(0.44, 0.57, 0.84);
     let dusk = vec3f(1.07, 0.85, 0.91);
@@ -207,7 +253,7 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
         let view_dir = normalize(scene.camera.xyz - s.world);
         let r = reflect(-view_dir, n);
         let rim = pow(1.0 - abs(dot(view_dir, n)), 3.0);
-        let reflection = river_sky(vec2<f32>(0.5 + 0.40*r.x, 0.50 - 0.45*r.y));
+        let reflection = river_sky(moving_clouds(panorama_uv(r)));
         let sheen = smoothstep(0.72, 0.97, dot(r, normalize(vec3<f32>(0.65, 0.33, -0.68))));
         let glass = mix(vec3<f32>(0.39, 0.55, 0.62), reflection, 0.55) + vec3<f32>(0.19)*sheen;
         return vec4<f32>(glass, 0.15 + rim*0.34 + sheen*0.10);
