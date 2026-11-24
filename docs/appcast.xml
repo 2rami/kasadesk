@@ -4,12 +4,12 @@
     <title>KasaDesk</title>
     <link>https://2rami.github.io/kasadesk/appcast.xml</link>
     <item>
-      <title>0.1.3</title>
-      <pubDate>Tue, 24 Nov 2026 00:46:40 GMT</pubDate>
-      <sparkle:version>0.1.3</sparkle:version>
-      <sparkle:shortVersionString>0.1.3</sparkle:shortVersionString>
+      <title>0.1.4</title>
+      <pubDate>Tue, 24 Nov 2026 01:21:20 GMT</pubDate>
+      <sparkle:version>0.1.4</sparkle:version>
+      <sparkle:shortVersionString>0.1.4</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-      <enclosure url="https://github.com/2rami/kasadesk/releases/download/v0.1.3/KasaDesk-0.1.3-macos-arm64.dmg" sparkle:edSignature="QxNWJubz18nkWxTEgWN33P0Pm8CSi/RBCLI4TkRBF/VOJJvt+IfM8XCKpTkbdIbTDFd/2vtOemEGHxBMd8vTDg==" length="18489164" type="application/octet-stream"/>
+      <enclosure url="https://github.com/2rami/kasadesk/releases/download/v0.1.4/KasaDesk-0.1.4-macos-arm64.dmg" sparkle:edSignature="4PQXxcLjqvtGd2Jp0YDSHYgDwp+YjD0WsNLBrd2KqnnE+ocxYPPaT08VAb785ADXJRq6d5jnvu/TaVuztnl6DQ==" length="18489948" type="application/octet-stream"/>
     </item>
   </channel>
 </rss>
