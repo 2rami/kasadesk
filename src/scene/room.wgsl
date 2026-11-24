@@ -6,6 +6,7 @@ struct Scene {
     world_from_clip: mat4x4<f32>,
     camera: vec4<f32>,
     lighting: vec4<f32>,
+    weather: vec4f,
     viewport: vec4<f32>,
     bench: vec4<f32>,
     landscape: vec4<f32>,
@@ -43,14 +44,90 @@ fn panorama_uv(direction: vec3f) -> vec2f {
     return vec2f(0.5 + lon * (0.5 / 3.14159265), 0.5 - lat / 3.14159265);
 }
 
-fn river_sky(coord: vec2f) -> vec3f {
+// Identifiers are shared with weather::Sky. The remaining channels carry intensity, wind and gusts.
+const CLEAR = 0u;
+const CLOUD = 1u;
+const FOG = 2u;
+const RAIN = 3u;
+const SNOW = 4u;
+const STORM = 5u;
+const HAIL = 6u;
+const SUNSHOWER = 7u;
+
+fn plate_tap(coord: vec2f) -> vec4f {
     let uv = vec2f(fract(coord.x), clamp(coord.y, 0.0, 1.0));
-    let color = textureSampleLevel(panorama, linear_sampler, uv, 0.0).rgb;
+    let color = textureSampleLevel(panorama, linear_sampler, uv, 0.0);
     let seam = min(uv.x, 1.0 - uv.x);
     if seam < 0.018 {
-        // The painted borders meet behind the room, outside the primary vista.
-        let other_side = textureSampleLevel(panorama, linear_sampler, vec2f(1.0 - uv.x, uv.y), 0.0).rgb;
-        return mix((color + other_side) * 0.5, color, smoothstep(0.0, 0.018, seam));
+        let other = textureSampleLevel(panorama, linear_sampler, vec2f(1.0 - uv.x, uv.y), 0.0);
+        return mix((color + other) * 0.5, color, smoothstep(0.0, 0.018, seam));
+    }
+    return color;
+}
+
+fn soft_plate(uv: vec2f, kind: u32) -> vec4f {
+    // Radius is in panorama texels, so resizing the window leaves the focus distance unchanged.
+    let radius = select(0.90, 2.25, kind == FOG);
+    let d = vec2f(radius) / vec2f(textureDimensions(panorama));
+    let a = vec2f(d.x, d.y * 0.5);
+    let b = vec2f(d.x * -0.5, d.y);
+    return 0.25 * (plate_tap(uv+a) + plate_tap(uv-a) + plate_tap(uv+b) + plate_tap(uv-b));
+}
+
+fn river_sky(uv: vec2f) -> vec3f {
+    let kind = u32(scene.weather.x);
+    let paint = soft_plate(uv, kind);
+    if kind == SUNSHOWER { return paint.rgb; }
+    let t = scene.lighting.w;
+    let day = scene.lighting.x;
+    let amount = scene.weather.y;
+    let wind = scene.weather.z;
+    let luma = dot(paint.rgb, vec3f(0.24,0.61,0.15));
+    let near_horizon = smoothstep(0.17,0.49,uv.y);
+    let blue = mix(vec3f(0.22,0.52,0.81), vec3f(0.75,0.86,0.92), near_horizon);
+    let night = mix(vec3f(0.028,0.054,0.13), vec3f(0.22,0.29,0.41), near_horizon);
+    let fair = mix(mix(night,blue,day), vec3f(0.97,0.68,0.52), 0.59 * near_horizon * scene.lighting.y);
+    if kind == CLEAR {
+        let sun = (uv - vec2f(0.46, 0.34)) * vec2f(2.0,1.0);
+        let glow = exp(-length(sun) * 14.0);
+        let disk = 1.0 - smoothstep(0.008,0.012,length(sun));
+        let angle = atan2(sun.y, sun.x + 0.00001);
+        let rays = 0.5 + 0.5*sin(9.0*angle + t*0.12 + sin(4.0*angle - t*0.09));
+        let cirrus = smoothstep(0.74, 0.94, luma) * 0.19;
+        var sky = mix(fair,vec3f(0.96,0.96,0.88), clamp((cirrus + (0.12+0.12*rays)*glow + 0.77*disk)*day,0.0,1.0));
+        if day < 1.0 {
+            let grid = uv * vec2f(180.0,90.0);
+            let cell = floor(grid);
+            let star = grain(cell + 61.0);
+            let offset = fract(grid) - vec2f(0.18+0.64*star,0.18+0.64*grain(cell+3.0));
+            let spark = (1.0-smoothstep(0.016,0.065,length(offset))) * smoothstep(0.72,0.85,star);
+            let crescent = disk*smoothstep(0.008,0.011,length(sun-vec2f(0.005,-0.004)));
+            sky += vec3f(0.79,0.85,1.0)*(1.0-day)*(0.58*crescent + spark*(0.46+0.12*sin(t*0.8+star*97.0)));
+        }
+        if amount > 0.0 {
+            let bank = cloudBank(uv, t*0.17, amount, wind);
+            sky = sky*(1.0-bank.a*amount) + bank.rgb*amount;
+        }
+        let ground = mix(paint.rgb, vec3f(luma*0.91,luma,luma*1.04), 0.21);
+        return mix(ground,sky,paint.a);
+    }
+    var cover = 0.78;
+    if kind == CLOUD { cover = amount; }
+    if kind == STORM || kind == HAIL { cover = 1.0; }
+    let night_light = mix(0.46,1.0,day);
+    let bank = cloudBank(uv, t*0.17, amount, wind);
+    let cloud_color = mix(vec3f(0.24,0.31,0.44),vec3f(0.86,0.88,0.92),luma) * night_light;
+    var sky = mix(mix(paint.rgb,fair,0.14), cloud_color, 0.3 + 0.7*cover);
+    sky = sky*(1.0-bank.a) + bank.rgb * night_light;
+    let storm = kind == STORM || kind == HAIL;
+    sky *= select(1.0,0.69,storm);
+    let ground = mix(paint.rgb,vec3f(luma*0.84,luma*0.95,luma*1.06),0.25 + 0.48*cover)
+                 * select(1.0,0.80,storm);
+    var color = mix(ground, sky, paint.a);
+    if kind == FOG {
+        let q = vec2f(uv.x * 2.7 - t*(0.018+0.026*wind), uv.y * 5.0);
+        let fog = 0.35 + 0.45 * smoothstep(0.27,0.70,cloudField(q));
+        color = mix(color,vec3f(0.76,0.83,0.87)*night_light,fog);
     }
     return color;
 }
@@ -108,16 +185,41 @@ fn horizon(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
     if glass.z > 0.0 {
         let p = vec2f(glass.x, 3.07 - glass.y) * 31.0;
         let t = scene.lighting.w;
-        let rain = falling(p, t, -0.18, 0.42, 0.08) + falling(p, t, -0.18, 0.42, 0.52)
-                 + falling(p, t, -0.18, 0.42, 0.93);
-        let spray = impact(p, t, 0.52, -0.18, 23.0);
-        let drop = bead(p * 0.74, 0.12, 47.0);
-        let wet = clamp(spray * 0.65 + rain * 0.66 + drop.y * 0.56, 0.0, 0.85);
-        if drop.x + drop.y > 0.0 {
-            let refracted = river_sky(sky_uv + vec2f(drop.y, -drop.x) * 0.004);
-            photo = mix(photo, refracted, min(1.0, 5.0 * (drop.x + drop.y)));
+        let kind = u32(scene.weather.x);
+        let amount = scene.weather.y;
+        let wind = scene.weather.z;
+        if kind == RAIN || kind == STORM || kind == HAIL || kind == SUNSHOWER {
+            let rain = falling(p,t,wind,amount,0.08) + falling(p,t,wind,amount,0.52) + falling(p,t,wind,amount,0.93);
+            let spray = impact(p,t,amount,wind,23.0);
+            let drop = bead(p*0.74,amount*0.60,47.0);
+            let wet = clamp(spray*0.65 + rain*0.66 + drop.y*0.56,0.0,0.85);
+            if drop.x + drop.y > 0.0 {
+                let refracted = river_sky(sky_uv + vec2f(drop.y,-drop.x)*0.004);
+                photo = mix(photo,refracted,min(1.0,5.0*(drop.x+drop.y)));
+            }
+            photo = mix(photo*(1.0-drop.x),vec3f(0.84,0.93,1.0),wet);
         }
-        photo = mix(photo * (1.0 - drop.x), vec3f(0.84, 0.93, 1.0), wet);
+        if kind == SNOW || kind == HAIL {
+            let ice = kind == HAIL;
+            let speed = select(52.0,196.0,ice);
+            let far = flakes(p,t,wind,16.0,speed*0.56,amount,1.15,ice);
+            let near = flakes(p+19.0,t,wind,32.0,speed,amount,2.70,ice);
+            photo = mix(photo,vec3f(0.94,0.97,1.0),min(0.95,0.38*far + 0.82*near));
+        }
+        if kind == STORM || kind == HAIL {
+            let cycle = t/6.8 + 0.14;
+            let age = fract(cycle);
+            let pulse = exp(-22.0*age)*smoothstep(0.0,0.022,age);
+            let origin = 0.23 + 0.51*grain(vec2f(floor(cycle),49.0));
+            let bend = 0.055*(haze(vec2f(sky_uv.y*43.0,floor(cycle)))-0.5);
+            let bolt = (1.0-smoothstep(0.0004,0.0022,abs(sky_uv.x-origin-bend)))
+                       *smoothstep(0.21,0.32,sky_uv.y)*(1.0-smoothstep(0.39,0.46,sky_uv.y));
+            photo += vec3f(0.83,0.85,1.0)*pulse*(0.50*bolt + 0.065);
+        }
+        if scene.weather.w > 0.0 {
+            let gust = windScene(p,t,0.0,wind,vec3f(0.86,0.91,0.96)) * scene.weather.w * 0.50;
+            photo = photo*(1.0-gust.a) + gust.rgb;
+        }
     }
     let night = vec3f(0.44, 0.57, 0.84);
     let dusk = vec3f(1.07, 0.85, 0.91);
@@ -190,8 +292,10 @@ fn light(s: Surface, n: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
     if all(uv > vec2<f32>(0.0)) && all(uv < vec2<f32>(1.0)) {
         visibility = textureSampleCompareLevel(shadow_map, compare_depth, uv, clip.z);
     }
-    let incident = vec3<f32>(0.35, 0.42, 0.55) * (0.85 + 0.20 * n.y)
-        + gold * max(dot(n, sun), 0.0) * (0.95 + 0.65 * scene.lighting.x) * visibility
+    let sky_kind = u32(scene.weather.x);
+    let overcast = select(0.0, scene.weather.y, sky_kind != CLEAR && sky_kind != SUNSHOWER);
+    let incident = vec3<f32>(0.35, 0.42, 0.55) * (0.85 + 0.20 * n.y + 0.24 * overcast)
+        + gold * max(dot(n, sun), 0.0) * (0.95 + 0.65 * scene.lighting.x) * visibility * (1.0 - 0.65*overcast)
         + blue * max(dot(n, bounce), 0.0) * 0.78;
     let strip = vec3<f32>(clamp(s.world.x, scene.bench.x, scene.bench.y), scene.bench.z + 0.20, -2.5) - s.world;
     let spill = max(dot(n, strip), 0.0) / (0.8 + dot(strip, strip));

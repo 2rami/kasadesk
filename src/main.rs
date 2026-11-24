@@ -19,6 +19,7 @@ mod scene;
 mod text;
 mod theme;
 mod update;
+mod weather;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

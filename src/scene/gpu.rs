@@ -30,6 +30,7 @@ struct Scene {
     world_from_clip: [[f32; 4]; 4],
     camera: [f32; 4],
     lighting: [f32; 4],
+    weather: [f32; 4],
     viewport: [f32; 4],
     bench: [f32; 4],
     landscape: [f32; 4],
@@ -78,8 +79,14 @@ impl RoomGpu {
             label: Some("KasaDesk room shader"),
             source: wgpu::ShaderSource::Wgsl(concat!(include_str!("showers.wgsl"), "\n", include_str!("room.wgsl")).into()),
         });
-        let plate = image::load_from_memory_with_format(include_bytes!("../../assets/river-panorama.jpg"), image::ImageFormat::Jpeg)
+        let mut plate = image::load_from_memory_with_format(include_bytes!("../../assets/river-panorama.jpg"), image::ImageFormat::Jpeg)
             .expect("embedded riverside panorama").into_rgba8();
+        let sky = image::load_from_memory_with_format(include_bytes!("../../assets/river-sky-mask.png"), image::ImageFormat::Png)
+            .expect("embedded skyline mask").into_luma8();
+        assert_eq!(plate.dimensions(), sky.dimensions());
+        for (pixel, &mask) in plate.pixels_mut().zip(sky.as_raw()) {
+            pixel[3] = mask;
+        }
         let texture = device.create_texture_with_data(queue, &wgpu::TextureDescriptor {
             label: Some("KasaDesk riverside horizon"),
             size: wgpu::Extent3d { width: plate.width(), height: plate.height(), depth_or_array_layers: 1 },
@@ -371,6 +378,7 @@ impl RoomGpu {
             world_from_clip: frame.world_from_clip.to_cols_array_2d(),
             camera: frame.camera.extend(1.0).to_array(),
             lighting: [frame.day, frame.dusk, frame.indoor, frame.rain_time],
+            weather: frame.weather,
             viewport: [size.width as f32, size.height as f32, preview_size.0 as f32, preview_size.1 as f32],
             preview_rect, fan_colors:rgb.map_or([[0.0;4];12],|(_,s)|s.lights()),
             bench: [left, right, mesh::DESK_Y, room_lo.z],

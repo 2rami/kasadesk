@@ -75,7 +75,7 @@ impl View {
         let projection = Mat4::perspective_rh(FOV_Y, aspect, 0.09, distance + 400.0);
         let clip_from_world = projection * view;
         let (day, dusk, indoor) = gpu::daylight();
-        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), camera: self.target + eye * distance, day, dusk, indoor, rain_time: 0.0 }
+        Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), camera: self.target + eye * distance, day, dusk, indoor, weather: [0.0; 4], rain_time: 0.0 }
     }
 }
 
@@ -87,6 +87,7 @@ pub struct Frame {
     day: f32,
     dusk: f32,
     indoor: f32,
+    weather: [f32; 4],
     rain_time: f32,
 }
 
@@ -315,9 +316,14 @@ pub struct Room {
     dive: Option<Dive>,
     arrived: Option<usize>,
     tags: Vec<(Rect, usize)>,
+    weather_link: Option<Rect>,
 }
 
 impl Room {
+    pub fn on_weather_source(&self, p: Point) -> bool {
+        self.dive.is_none() && self.weather_link.is_some_and(|r| contains(r, p))
+    }
+
     pub fn reflow(&mut self, window: Point, machines: &[Machine]) {
         let window = (window.0.max(1.0), window.1.max(1.0));
         let key = self.keyboard.as_ref().and_then(|name| machines.iter().position(|m| &m.label == name));
@@ -402,6 +408,7 @@ impl Room {
         if self.dive.is_some() {
             return None;
         }
+        if self.on_weather_source(p) { return None; }
         if let Some(&(_, index)) = self.tags.iter().find(|(r, _)| contains(*r, p)) {
             return Some(index);
         }
@@ -695,6 +702,7 @@ impl Room {
         live: &[bool],
         foot: &str,
         app_alive: bool,
+        weather: crate::weather::Weather,
         overlay: impl FnOnce(&mut GridRenderer, &mut Ui, (f32, f32)),
     ) -> anyhow::Result<usize> {
         let now = Instant::now();
@@ -715,6 +723,7 @@ impl Room {
         let view = dive.and_then(|(i, t, _)| Some(View::mix(home_view, layout.dive_view(i)?, t))).unwrap_or(home_view);
         let mut frame = view.frame(layout.window);
         frame.rain_time = self.rain_time as f32;
+        frame.weather = weather.conditions().uniform();
         let calm = 1.0 - dive.map_or(0.0, |(_, t, _)| smooth(0.0, 0.3, t));
 
         let home = home_view.frame(layout.window);
@@ -776,11 +785,20 @@ impl Room {
             }
         }
         let heading = if editing.is_some() { "조명 · 냉각" } else { "여우비 작업실" };
-        let title_w = ui.measure(g, heading, 18.0, true) + 71.0;
+        let caption = weather.caption();
+        let caption_w = ui.measure(g, &caption, 10.0, true);
+        let source_w = if weather.has_source() { ui.measure(g, "Open-Meteo", 10.0, true) + 8.0 } else { 0.0 };
+        let title_w = ui.measure(g, heading, 18.0, true).max(caption_w + source_w) + 71.0;
         g.round_rect_fill(PAD, 16.0, title_w, 52.0, 9.0, fade(TAG, calm));
-        crate::theme::sunshower(g, PAD + 12.0, 25.0, calm);
+        crate::theme::weather_icon(g, PAD + 12.0, 25.0, calm, weather.conditions().sky, frame.indoor > 0.85);
         g.rect(PAD + 52.0, 25.0, 1.0, 34.0, fade(crate::theme::EDGE, calm));
-        ui.draw(g, PAD + 62.0, 22.0, "KasaDesk", 10.0, fade(LIVE, calm), true);
+        ui.draw(g, PAD + 62.0, 22.0, &caption, 10.0, fade(LIVE, calm), true);
+        self.weather_link = weather.has_source().then(|| {
+            let x = PAD + 62.0 + caption_w + 8.0;
+            let width = ui.draw(g, x, 22.0, "Open-Meteo", 10.0, fade(MUTE, calm), true);
+            g.rect(x, 33.0, width, 0.8, fade(MUTE, calm));
+            (x - 3.0, 17.0, width + 6.0, 19.0)
+        });
         ui.draw(g, PAD + 61.0, 37.0, heading, 18.0, fade(TEXT, calm), true);
         if machines.is_empty() {
             let text = if app_alive { "카사텀 명부에 기기를 추가하세요" } else { "카사텀을 띄우거나 로그인하면 기기가 보여요" };

@@ -36,6 +36,7 @@ pub enum Ev {
     /// 새 장·상태 — 다시 그린다.
     Wake,
     Preview(WindowId),
+    Weather(crate::weather::Weather),
     Rgb(WindowId, u64, crate::rgb::Update),
     /// 그 기기를 연다(None 이면 고르기 창).
     Open(Option<String>),
@@ -82,7 +83,7 @@ impl Win {
     }
 
     fn room_cursor(&self, count: usize) {
-        self.window.set_cursor(if self.room.pointer_on_device() || self.room.pointer_on_page(count) {
+        self.window.set_cursor(if self.room.on_weather_source(self.cursor) || self.room.pointer_on_device() || self.room.pointer_on_page(count) {
             CursorIcon::Pointer
         } else {
             CursorIcon::Default
@@ -116,6 +117,7 @@ pub struct Desk {
     hangul: kasa_ime::Composer,
     focused: Option<WindowId>,
     test: crate::rig::Rig,
+    weather: crate::weather::Weather,
     session: Arc<Session>,
     state: std::path::PathBuf,
     login: Login,
@@ -133,11 +135,13 @@ impl Desk {
         let test = crate::rig::Rig::from_env();
         let mut login = Login::default();
         login.open = test.login_panel;
+        crate::weather::start(&net.handle, proxy.clone());
         let desk = Self {
             proxy,
             net,
             windows: HashMap::new(),
             pending: vec![open],
+            weather: Default::default(),
             machines: Vec::new(),
             paths: Vec::new(),
             live: Vec::new(),
@@ -336,7 +340,7 @@ impl Desk {
             let preview = w.room.selected().and_then(|i| Some((i, w.preview.picture(self.machines.get(i)?)?)));
             let index=w.room.rgb_index(&self.machines,self.rgb_config.as_deref());
             let snap=w.rgb.data.clone();
-            w.room.paint(preview.as_ref().map(|(i, p)| (*i, p.as_ref())), index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.fan_index())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, |g, ui, size| {
+            w.room.paint(preview.as_ref().map(|(i, p)| (*i, p.as_ref())), index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.fan_index())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, self.weather, |g, ui, size| {
                 if !w.rgb.open { login.paint_chip(g, ui, size.0, cred.as_ref()); }
                 #[cfg(windows)]
                 if let Some((version, rect)) = update.as_mut().filter(|_|!w.rgb.open) {
@@ -410,6 +414,10 @@ impl Desk {
             }
             let rgb_index = w.room.rgb_index(&self.machines, self.rgb_config.as_deref());
             let left = matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. });
+            if left && !w.rgb.open && w.room.on_weather_source(w.cursor) {
+                account::open_browser("https://open-meteo.com/");
+                return;
+            }
             if let Some(index) = rgb_index {
                 if left {
                     let was_open = w.rgb.open;
@@ -693,6 +701,10 @@ impl ApplicationHandler<Ev> for Desk {
                     w.rgb.receive(generation, data);
                     w.window.request_redraw();
                 }
+            }
+            Ev::Weather(weather) => {
+                self.weather = weather;
+                self.redraw_pickers();
             }
             Ev::Preview(id) => {
                 if let Some(w) = self.windows.get(&id).filter(|w| w.label.is_none()) { w.window.request_redraw(); }
