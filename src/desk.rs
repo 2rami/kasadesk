@@ -914,12 +914,14 @@ impl ApplicationHandler<Ev> for Desk {
                 w.window.request_redraw();
             }
             if let Some(at)=w.rgb.retry_at(){schedule(&mut next,at);}
-            let visible = if w.occluded || self.login.open || w.window.is_minimized() == Some(true) { &[] } else { w.room.preview_targets() };
+            let hidden = (w.occluded || w.window.is_minimized() == Some(true)) && !self.test.captures_previews();
+            let visible = if hidden || self.login.open { &[] } else { w.room.preview_targets() };
             let proxy = self.proxy.clone();
-            if w.preview.sync(visible, &self.machines, &self.live, &self.net, move || { let _ = proxy.send_event(Ev::Preview(id)); }) {
-                w.window.request_redraw();
-            }
-            if let Some(at) = w.preview.next_wake() { schedule(&mut next, at); }
+            let (changed, retry_at) = w.preview.sync(visible, &self.machines, &self.live, &self.net, move || {
+                let _ = proxy.send_event(Ev::Preview(id));
+            });
+            if changed { w.window.request_redraw(); }
+            if let Some(at) = retry_at { schedule(&mut next, at); }
             let weather = !w.occluded && !w.rgb.open && !self.login.open && (self.focused == Some(id) || self.test.drives_picker());
             if let Some(at) = w.room.next_frame(weather) {
                 if at <= now {

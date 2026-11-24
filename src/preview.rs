@@ -1,8 +1,14 @@
+mod thumbnail;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use h264_reader::nal::{
+    sps::{FrameMbsFlags, SeqParameterSet},
+    Nal, RefNal,
+};
 use kasa_cast::{Config, Event, Frame, Watch};
 use kasa_castview::Start;
 use openh264::{decoder::Decoder, formats::YUVSource};
@@ -12,6 +18,8 @@ use crate::roster::Machine;
 
 pub const WIDTH: u32 = 512;
 pub const HEIGHT: u32 = 320;
+const PACKET_LIMIT: usize = 4 << 20;
+const DENIED_RETRY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Quality {
@@ -68,6 +76,7 @@ impl Stream {
     fn open(start: Start, quality: Quality, redraw: impl Fn() + Send + Sync + 'static) -> Option<Self> {
         let Start::Connect(connect) = start else { return None };
         let cfg = quality.capture();
+        let limit = (cfg.max_w as usize, cfg.max_h as usize);
         let (tx, rx) = mpsc::sync_channel(4);
         let redraw = Arc::new(redraw);
         let wake_closed = redraw.clone();
@@ -77,7 +86,12 @@ impl Stream {
             cfg,
             Box::new(move |event| match event {
                 Event::Frame { frame, .. } => {
-                    let _ = tx.try_send(frame);
+                    // Some older headers omit dimensions. The SPS and decoded picture are checked independently.
+                    if frame.data.len() <= PACKET_LIMIT
+                        && thumbnail::fits_input(frame.width.max(1), frame.height.max(1))
+                    {
+                        let _ = tx.try_send(frame);
+                    }
                 }
                 Event::Closed(_) => wake_closed(),
                 Event::Denied(_) => {
@@ -104,15 +118,21 @@ impl Stream {
                                 next = Some(frame.seq.wrapping_add(1));
                                 if let Some(yuv) = decoded {
                                     let (w, h) = yuv.dimensions();
-                                    if w == 0 || h == 0 || w > WIDTH as usize || h > HEIGHT as usize {
+                                    if !thumbnail::fits_input(w as u32, h as u32) || w % 2 != 0 || h % 2 != 0 {
                                         continue;
                                     }
-                                    let mut rgba = vec![0; w * h * 4];
-                                    yuv.write_rgba8(&mut rgba);
+                                    let size = thumbnail::fitted(w, h, limit);
+                                    let rgba = if size == (w, h) {
+                                        let mut rgba = vec![0; w * h * 4];
+                                        yuv.write_rgba8(&mut rgba);
+                                        rgba
+                                    } else {
+                                        thumbnail::downsample(&yuv, size)
+                                    };
                                     static SERIAL: AtomicU64 = AtomicU64::new(1);
                                     let pic = Picture {
                                         serial: SERIAL.fetch_add(1, Ordering::Relaxed),
-                                        size: (w as u32, h as u32),
+                                        size: (size.0 as u32, size.1 as u32),
                                         rgba,
                                     };
                                     *dest.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(pic));
@@ -134,14 +154,37 @@ impl Stream {
     }
 }
 
+fn append_nal(packet: &mut Vec<u8>, bytes: &[u8]) -> Option<()> {
+    let kind = *bytes.first()? & 31;
+    if packet.len().checked_add(bytes.len())?.checked_add(4)? > PACKET_LIMIT || kind == 15 {
+        return None;
+    }
+    // AVCC supplies one escaped NAL per length. Preserve that boundary for the Annex B decoder.
+    if memchr::memmem::find(bytes, &[0, 0, 1]).is_some() {
+        return None;
+    }
+    // The decoder allocates for coded macroblocks, even when the transport header or crop is smaller.
+    if kind == 7 {
+        let sps = SeqParameterSet::from_bits(RefNal::new(bytes, &[], true).rbsp_bits()).ok()?;
+        let lines = if matches!(sps.frame_mbs_flags, FrameMbsFlags::Frames) { 16 } else { 32 };
+        let w = sps.pic_width_in_mbs_minus1.checked_add(1)?.checked_mul(16)?;
+        let h = sps.pic_height_in_map_units_minus1.checked_add(1)?.checked_mul(lines)?;
+        if !thumbnail::fits_input(w, h) {
+            return None;
+        }
+    }
+    packet.extend_from_slice(&[0, 0, 0, 1]);
+    packet.extend_from_slice(bytes);
+    Some(())
+}
+
 fn annex_b(frame: &Frame) -> Option<Vec<u8>> {
-    if frame.data.len() > 4 << 20 || frame.width > WIDTH || frame.height > HEIGHT {
+    if frame.data.len() > PACKET_LIMIT {
         return None;
     }
     let mut packet = Vec::with_capacity(frame.data.len() + 128);
     for bytes in &frame.param_sets {
-        packet.extend_from_slice(&[0, 0, 0, 1]);
-        packet.extend_from_slice(bytes);
+        append_nal(&mut packet, bytes)?;
     }
     let mut data = frame.data.as_slice();
     while !data.is_empty() {
@@ -151,8 +194,7 @@ fn annex_b(frame: &Frame) -> Option<Vec<u8>> {
             return None;
         }
         let (nal, remain) = rest.split_at_checked(len)?;
-        packet.extend_from_slice(&[0, 0, 0, 1]);
-        packet.extend_from_slice(nal);
+        append_nal(&mut packet, nal)?;
         data = remain;
     }
     Some(packet)
@@ -183,24 +225,29 @@ impl Feed {
         stream.latest.lock().unwrap_or_else(|e| e.into_inner()).clone().or_else(|| self.previous.clone())
     }
 
-    fn update(&mut self, pixels: f32, start: impl FnOnce() -> Start, wake: impl Fn() + Send + Sync + 'static) -> bool {
-        if self.denied {
+    fn observe_close(&mut self, now: Instant) -> bool {
+        if !self.stream.as_ref().is_some_and(|s| s.watch.is_closed() || s.denied.load(Ordering::Acquire)) {
             return false;
         }
-        let now = Instant::now();
+        let stream = self.stream.take().unwrap();
+        self.previous = None;
+        self.denied = stream.denied.load(Ordering::Acquire);
+        self.due = Some(now + if self.denied { DENIED_RETRY } else { Duration::from_secs(4) });
+        true
+    }
+
+    fn update(
+        &mut self,
+        now: Instant,
+        pixels: f32,
+        start: impl FnOnce() -> Start,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> bool {
         let quality = Quality::for_pixels(pixels, Some(self.quality));
         if self.previous.is_some()
             && self.stream.as_ref().is_some_and(|s| s.latest.lock().unwrap_or_else(|e| e.into_inner()).is_some())
         {
             self.previous = None;
-        }
-        let closed = self.stream.as_ref().is_some_and(|s| s.watch.is_closed() || s.denied.load(Ordering::Acquire));
-        if closed {
-            let stream = self.stream.take().unwrap();
-            self.previous = None;
-            self.denied = stream.denied.load(Ordering::Acquire);
-            self.due = (!self.denied).then_some(now + Duration::from_secs(4));
-            return true;
         }
         if quality != self.requested {
             self.requested = quality;
@@ -212,6 +259,7 @@ impl Feed {
             // Keep the last decoded frame on the same screen while its encoder changes size.
             self.previous = self.picture();
             self.stream = None;
+            self.denied = false;
             self.quality = self.requested;
             self.stream = Stream::open(start(), self.quality, wake);
             self.due = self.stream.is_none().then_some(now + Duration::from_secs(4));
@@ -234,19 +282,15 @@ impl Previews {
         live: &[bool],
         net: &Arc<Net>,
         wake: impl Fn() + Clone + Send + Sync + 'static,
-    ) -> bool {
+    ) -> (bool, Option<Instant>) {
+        let now = Instant::now();
+        let mut changed = false;
+        let mut next: Option<Instant> = None;
         let before = self.feeds.len();
         self.feeds.retain(|label, f| {
-            if let Some(s) = &f.stream {
-                if s.denied.load(Ordering::Acquire) {
-                    f.denied = true;
-                    f.stream = None;
-                    f.previous = None;
-                    f.due = None;
-                }
-            }
-            // A camera turn must not re-request a capture the remote device has declined.
-            if f.denied {
+            changed |= f.observe_close(now);
+            // Preserve the cooldown across a camera turn, but only a visible screen schedules a retry.
+            if f.denied && f.due.is_some_and(|at| now < at) {
                 return machines
                     .iter()
                     .enumerate()
@@ -256,7 +300,7 @@ impl Previews {
                 live.get(i) == Some(&true) && machines.get(i).is_some_and(|m| &m.label == label && f.matches(m))
             })
         });
-        let mut changed = self.feeds.len() != before;
+        changed |= self.feeds.len() != before;
         for &(i, pixels) in visible {
             let Some(m) = machines.get(i).filter(|_| live.get(i) == Some(&true)) else { continue };
             let feed = self.feeds.entry(m.label.clone()).or_insert_with(|| {
@@ -272,13 +316,12 @@ impl Previews {
                     denied: false,
                 }
             });
-            changed |= feed.update(pixels, || net.start_view(&m.label), wake.clone());
+            changed |= feed.update(now, pixels, || net.start_view(&m.label), wake.clone());
+            if let Some(at) = feed.due {
+                next = Some(next.map_or(at, |prev| prev.min(at)));
+            }
         }
-        changed
-    }
-
-    pub fn next_wake(&self) -> Option<Instant> {
-        self.feeds.values().filter_map(|f| f.due).min()
+        (changed, next)
     }
 
     pub fn picture(&self, m: &Machine) -> Option<Arc<Picture>> {
@@ -301,18 +344,49 @@ mod tests {
     }
 
     #[test]
+    fn denial_cooldown_survives_quality_changes_and_allows_a_later_attempt() {
+        let now = Instant::now();
+        let retry_at = now + DENIED_RETRY;
+        let mut feed = Feed {
+            peer: None,
+            service: None,
+            quality: Quality::Far,
+            requested: Quality::Far,
+            due: Some(retry_at),
+            stream: None,
+            previous: None,
+            denied: true,
+        };
+        assert!(!feed.update(now, 900.0, || panic!("early permission retry"), || {}));
+        assert_eq!(feed.due, Some(retry_at));
+        assert!(feed.update(retry_at, 900.0, || Start::Wait(String::new()), || {}));
+        assert!(!feed.denied);
+        assert_eq!(feed.quality, Quality::Near);
+    }
+
+    #[test]
+    fn coded_dimensions_are_checked_before_decode() {
+        // A standard 4096x2160 SPS from a DCI 4K stream is outside the preview budget.
+        let sps = [0x67, 0x64, 0x10, 0x33, 0xac, 0xb8, 2, 0, 2, 0x1f, 0x42, 0, 0, 3, 0, 2, 0, 0, 3, 0, 8, 8];
+        let mut packet = Vec::new();
+        assert!(append_nal(&mut packet, &sps).is_none());
+        assert!(packet.is_empty());
+    }
+
+    #[test]
     fn preview_preserves_parameter_sets_and_rejects_truncated_nals() {
+        let sps =
+            [0x67, 0x64, 0x10, 0x28, 0xac, 0xb8, 0x0f, 0, 0x44, 0xfc, 0xb0, 0x80, 0, 0, 3, 0, 0x80, 0, 0, 3, 2, 2];
         let mut frame = Frame {
-            width: 320,
-            height: 180,
-            param_sets: vec![vec![0x67, 1], vec![0x68]],
+            width: 1920,
+            height: 1080,
+            param_sets: vec![sps.to_vec(), vec![0x68]],
             data: vec![0, 0, 0, 2, 0x65, 3, 0, 0, 0, 1, 0x06],
             ..Default::default()
         };
-        assert_eq!(
-            annex_b(&frame).unwrap(),
-            [0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65, 3, 0, 0, 0, 1, 0x06]
-        );
+        let packet = annex_b(&frame).unwrap();
+        assert_eq!(&packet[4..4 + sps.len()], &sps);
+        assert_eq!(&packet[4 + sps.len()..], &[0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65, 3, 0, 0, 0, 1, 0x06]);
         frame.data.pop();
         assert!(annex_b(&frame).is_none());
     }

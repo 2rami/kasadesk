@@ -81,6 +81,7 @@ pub struct Rig {
     picker_input: Option<Vec<(Instant, PickerAction)>>,
     /// 키·글은 이 파일이 생긴 뒤에만 보낸다 — 리그가 시험 창이 맨 앞인 것을 확인하고 만든다(사람 앱으로 키가 새지 않게).
     gate: Option<PathBuf>,
+    preview_capture: bool,
     pub silent_audio: bool,
     /// 띄우자마자 로그인 판을 연다 — 판 모양을 뜨는 리그.
     pub login_panel: bool,
@@ -143,6 +144,7 @@ impl Rig {
             input,
             picker_input,
             gate: env("KASATERM_VIEW_TEST_INPUT_GATE").map(PathBuf::from),
+            preview_capture: env("KASATERM_VIEW_TEST_PREVIEW_CAPTURE").as_deref() == Some("1"),
             silent_audio: env("KASATERM_TEST_SCREEN_AUDIO_SILENT").is_some(),
             login_panel: env("KASATERM_VIEW_TEST_LOGIN_PANEL").is_some(),
             login: env("KASATERM_VIEW_TEST_LOGIN").and_then(|v| v.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))),
@@ -232,6 +234,11 @@ impl Rig {
 
     pub fn drives_picker(&self) -> bool {
         self.picker_input.is_some()
+    }
+
+    // A scripted GPU readback still consumes the room's pictures when another window covers the rig.
+    pub fn captures_previews(&self) -> bool {
+        self.preview_capture && self.drives_picker()
     }
 
     pub fn take_picker_actions(&mut self, now: Instant) -> Vec<PickerAction> {
