@@ -105,7 +105,8 @@ impl Win {
 }
 
 pub struct Desk {
-    proxy: EventLoopProxy<Ev>,
+    // On macOS cloning a native proxy registers a run-loop source and wakes the loop.
+    proxy: Arc<EventLoopProxy<Ev>>,
     net: Arc<Net>,
     windows: HashMap<WindowId, Win>,
     pending: Vec<Option<String>>,
@@ -137,7 +138,7 @@ impl Desk {
         login.open = test.login_panel;
         crate::weather::start(&net.handle, proxy.clone());
         let desk = Self {
-            proxy,
+            proxy: Arc::new(proxy),
             net,
             windows: HashMap::new(),
             pending: vec![open],
