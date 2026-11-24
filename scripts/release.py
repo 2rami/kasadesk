@@ -204,7 +204,9 @@ def build_mac(repo, version, out):
     run("codesign", "--force", "--sign", identity, "--timestamp", "--keychain", KEYCHAIN, dmg, quiet=True)
     log("공증 중")
     unlock()
-    raw = run("xcrun", "notarytool", "submit", dmg, "--keychain-profile", NOTARY_PROFILE, *notary_keychain(),
+    # --force: 올리기 전 검사가 dmg 를 붙였다가 개발 맥에서 가끔 영영 못 떼고 멈춘다(2026-11-24 두 번, 50분 시간 초과).
+    # 형식은 위 hdiutil·codesign 이 이미 확인했고 Apple 쪽이 다시 본다.
+    raw = run("xcrun", "notarytool", "submit", dmg, "--force", "--keychain-profile", NOTARY_PROFILE, *notary_keychain(),
               "--wait", "--timeout", "45m", "--output-format", "json", quiet=True, timeout=3000)
     status = json.loads(raw or "{}")
     if status.get("status") != "Accepted":
