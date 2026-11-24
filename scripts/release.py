@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""KasaDesk 릴리스 — 릴리스 기계(맥미니)에서 돈다. 카사텀 미리보기 배포와 같은 길이다.
+"""KasaDesk 릴리스 — 맥 릴리스 기계에서 돈다(개발 맥이 먼저, 맥미니가 예비). 카사텀 미리보기 배포와 같은 길이다.
 
   python3 scripts/release.py [커밋]      # 기본은 origin/main 끝
 
@@ -8,7 +8,11 @@
 3. 태그와 GitHub 릴리스(dmg)를 만들고, Windows 굽기(.github/workflows/release.yml)를 그 태그로 불러 MSI 를 붙이게 한다.
 4. dmg·MSI 에 이 앱 전용 EdDSA 키로 서명해 docs/appcast.xml·appcast-win.xml 을 main 에 올리고, Pages 가 새 판을 내줄 때까지 기다린다.
 
-비밀값은 이 기계에만 있다 — EdDSA 개인키(~/.config/kasadesk-release/), 서명 열쇠고리, 공증 프로필. 저장소·로그에는 남기지 않는다.
+Windows MSI 는 저장소 변수 WINDOWS_RUNNER(집 PC 자체 러너 kasa-home)가 굽는다. 한 번에 한 기계에서만 돌린다 — 두 곳에서
+동시에 돌리면 판 커밋이 엇갈린다.
+
+비밀값은 릴리스 기계에만 있다 — EdDSA 개인키(~/.config/kasadesk-release/, 개발 맥·맥미니·집 PC 에 같은 키), Developer ID 가 든
+열쇠고리, 공증 프로필(AC_NOTARY). 저장소·로그에는 남기지 않는다.
 """
 
 import argparse
@@ -32,7 +36,9 @@ HOME = Path.home()
 WORK = HOME / ".local/share/kasadesk-release"
 ED_KEY = HOME / ".config/kasadesk-release/sparkle-ed25519.key"
 SIGN_UPDATE = WORK / "Sparkle/bin/sign_update"
-KEYCHAIN = HOME / "Library/Keychains/codesign.keychain-db"
+# 맥미니는 서명 전용 열쇠고리를 따로 두고, 개발 맥은 로그인 열쇠고리에 Developer ID 가 있다.
+KEYCHAIN = next((k for k in (HOME / "Library/Keychains/codesign.keychain-db", HOME / "Library/Keychains/login.keychain-db")
+                 if k.exists()), HOME / "Library/Keychains/codesign.keychain-db")
 UNLOCK = HOME / "bin/unlock-signing"
 NOTARY_PROFILE = "AC_NOTARY"
 TEAM = "L366799VND"

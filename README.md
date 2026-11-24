@@ -99,9 +99,11 @@ pwsh scripts/windows/package.ps1   # dist/KasaDesk-<판>-windows-x86_64.msi
 
 ## 릴리스
 
-릴리스 기계(맥미니)에서 `python3 scripts/release.py` 하나로 내요 — 판 번호 올리기, 맥 굽기·공증, 태그·릴리스,
-Windows 굽기(`.github/workflows/release.yml` 을 태그로 불러 MSI 를 붙임), 두 피드 서명·게시, Pages 확인까지.
-서명 열쇠고리·공증 프로필·EdDSA 개인키는 그 기계에만 있고, 이 저장소와 GitHub 에는 비밀값이 없어요.
+맥 릴리스 기계(개발 맥이 먼저, 맥미니가 예비)에서 `python3 scripts/release.py` 하나로 내요 — 판 번호 올리기, 맥 굽기·공증,
+태그·릴리스, Windows 굽기(`.github/workflows/release.yml` 을 태그로 불러 집 PC 자체 러너가 MSI 를 붙임), 두 피드 서명·게시,
+Pages 확인까지. 한 번에 한 기계에서만 돌려요.
+Developer ID 열쇠고리·공증 프로필·EdDSA 개인키는 릴리스 기계에만 있고(EdDSA 키는 집 PC 에도 같은 것), 이 저장소와 GitHub 에는
+비밀값이 없어요.
 
 ## 라이선스
 
