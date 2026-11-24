@@ -105,6 +105,12 @@ def signing_identity():
     raise Stop(f"{KEYCHAIN} 에 팀 {TEAM} 의 Developer ID Application 인증서가 없다")
 
 
+def notary_keychain():
+    """공증 프로필이 든 열쇠고리 — 맥미니는 서명 전용 열쇠고리에 넣었고, 개발 맥은 store-credentials 기본 자리(로그인 파일로
+    지정하면 못 찾는다)라 넘기지 않는다."""
+    return [] if KEYCHAIN.name == "login.keychain-db" else ["--keychain", KEYCHAIN]
+
+
 def unlock():
     if os.access(UNLOCK, os.X_OK):
         run(UNLOCK, quiet=True, timeout=60)
@@ -198,7 +204,7 @@ def build_mac(repo, version, out):
     run("codesign", "--force", "--sign", identity, "--timestamp", "--keychain", KEYCHAIN, dmg, quiet=True)
     log("공증 중")
     unlock()
-    raw = run("xcrun", "notarytool", "submit", dmg, "--keychain-profile", NOTARY_PROFILE, "--keychain", KEYCHAIN,
+    raw = run("xcrun", "notarytool", "submit", dmg, "--keychain-profile", NOTARY_PROFILE, *notary_keychain(),
               "--wait", "--timeout", "45m", "--output-format", "json", quiet=True, timeout=3000)
     status = json.loads(raw or "{}")
     if status.get("status") != "Accepted":
