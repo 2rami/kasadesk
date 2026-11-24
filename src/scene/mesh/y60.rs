@@ -208,8 +208,7 @@ pub(in crate::scene) fn geometry() -> Geometry {
         hi = hi.max(point);
     }
     Geometry {
-        vertices: m.vertices,
-        opaque_count,
+        mesh: crate::scene::lod::IndexedModel::new(&m.vertices, opaque_count, (hi+lo)*0.5, (hi-lo)*0.5),
         atlas: Vec::new(),
         center: (hi + lo) * 0.5,
         half: (hi - lo) * 0.5,

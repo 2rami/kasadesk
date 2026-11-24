@@ -71,7 +71,7 @@ struct Win {
     occluded: bool,
     room: Room,
     rgb: crate::rgb::Panel,
-    preview: crate::preview::Preview,
+    preview: crate::preview::Previews,
     ui: Ui,
 }
 
@@ -337,10 +337,12 @@ impl Desk {
             let (login, cred) = (&mut self.login, self.session.get());
             #[cfg(windows)]
             let update = &mut self.update;
-            let preview = w.room.selected().and_then(|i| Some((i, w.preview.picture(self.machines.get(i)?)?)));
+            let pictures: Vec<_> = w.room.preview_targets().iter().filter_map(|&(i, _)| {
+                Some((i, w.preview.picture(self.machines.get(i)?)?))
+            }).collect();
             let index=w.room.rgb_index(&self.machines,self.rgb_config.as_deref());
             let snap=w.rgb.data.clone();
-            w.room.paint(preview.as_ref().map(|(i, p)| (*i, p.as_ref())), index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.fan_index())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, self.weather, |g, ui, size| {
+            w.room.paint(&pictures, index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.fan_index())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, self.weather, |g, ui, size| {
                 if !w.rgb.open { login.paint_chip(g, ui, size.0, cred.as_ref()); }
                 #[cfg(windows)]
                 if let Some((version, rect)) = update.as_mut().filter(|_|!w.rgb.open) {
@@ -911,10 +913,11 @@ impl ApplicationHandler<Ev> for Desk {
                 w.window.request_redraw();
             }
             if let Some(at)=w.rgb.retry_at(){schedule(&mut next,at);}
-            let target = w.room.selected().filter(|&i| self.live.get(i) == Some(&true)
-                && !w.rgb.open && !self.login.open && (self.focused == Some(id) || self.test.drives_picker()) && w.room.has_screen(i)).and_then(|i| self.machines.get(i));
+            let visible = if w.occluded || self.login.open || w.window.is_minimized() == Some(true) { &[] } else { w.room.preview_targets() };
             let proxy = self.proxy.clone();
-            if w.preview.sync(target, &self.net, move || { let _ = proxy.send_event(Ev::Preview(id)); }) { w.window.request_redraw(); }
+            if w.preview.sync(visible, &self.machines, &self.live, &self.net, move || { let _ = proxy.send_event(Ev::Preview(id)); }) {
+                w.window.request_redraw();
+            }
             if let Some(at) = w.preview.next_wake() { schedule(&mut next, at); }
             let weather = !w.occluded && !w.rgb.open && !self.login.open && (self.focused == Some(id) || self.test.drives_picker());
             if let Some(at) = w.room.next_frame(weather) {

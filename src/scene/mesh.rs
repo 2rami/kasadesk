@@ -31,7 +31,7 @@ pub const DESK_Y: f32 = 5.8;
 const MINI_SLOT: f32 = 7.8;
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct Vertex {
     pub point: [f32; 3],
     pub normal: [f32; 3],

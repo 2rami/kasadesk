@@ -3,6 +3,7 @@
 mod catalog;
 mod gpu;
 mod mesh;
+mod lod;
 
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
@@ -72,7 +73,8 @@ impl View {
         let eye = self.direction();
         let distance = self.half / (FOV_Y * 0.5).tan();
         let view = Mat4::look_at_rh(self.target + eye * distance, self.target, Vec3::Y);
-        let projection = Mat4::perspective_rh(FOV_Y, aspect, 0.09, distance + 400.0);
+        // Reverse floating-point depth keeps a distant panel distinct from its cover glass.
+        let projection = Mat4::perspective_rh(FOV_Y, aspect, distance + 400.0, 0.09);
         let clip_from_world = projection * view;
         let (day, dusk, indoor) = gpu::daylight();
         Frame { window, clip_from_world, world_from_clip: clip_from_world.inverse(), camera: self.target + eye * distance, day, dusk, indoor, weather: [0.0; 4], rain_time: 0.0 }
@@ -91,6 +93,8 @@ pub struct Frame {
     rain_time: f32,
 }
 
+struct Footprint { full: f32, visible: f32 }
+
 impl Frame {
     fn project(&self, world: Vec3) -> Vec2 {
         let ndc = self.clip_from_world.project_point3(world);
@@ -103,14 +107,37 @@ impl Frame {
         Some(self.project(p))
     }
 
+    /// Clip the projected bounds conservatively so a screen filling the view is still visible
+    /// when all of its corners lie outside. Return its size in logical pixels for stream LOD.
+    fn footprint(&self, lo: Vec3, hi: Vec3) -> Option<Footprint> {
+        let corners: [_; 8] = std::array::from_fn(|i| self.clip_from_world * vec3(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z }).extend(1.0));
+        if corners.iter().all(|p| p.x < -p.w) || corners.iter().all(|p| p.x > p.w)
+            || corners.iter().all(|p| p.y < -p.w) || corners.iter().all(|p| p.y > p.w)
+            || corners.iter().all(|p| p.z < 0.0) || corners.iter().all(|p| p.z > p.w) { return None; }
+        if corners.iter().any(|p| p.w < 0.001) { let width = self.window.0.max(self.window.1); return Some(Footprint { full: width, visible: width }); }
+        let mut low = Vec2::splat(f32::INFINITY);
+        let mut high = Vec2::splat(f32::NEG_INFINITY);
+        for p in corners {
+            let ndc = vec2(p.x,p.y) / p.w;
+            low = low.min(ndc);
+            high = high.max(ndc);
+        }
+        let span = high.min(Vec2::ONE) - low.max(-Vec2::ONE);
+        let scale = vec2(self.window.0, self.window.1) * 0.5;
+        Some(Footprint { full: ((high-low)*scale).max_element(), visible: (span*scale).max_element() })
+    }
+
     fn ray(&self, (x, y): Point) -> Option<Ray> {
         let (w, h) = self.window;
         if x < 0.0 || x >= w || y < 0.0 || y >= h {
             return None;
         }
         let (x, y) = (x / w * 2.0 - 1.0, 1.0 - y / h * 2.0);
-        let near = self.world_from_clip.project_point3(vec3(x, y, 0.0));
-        let far = self.world_from_clip.project_point3(vec3(x, y, 1.0));
+        let near = self.world_from_clip.project_point3(vec3(x, y, 1.0));
+        let far = self.world_from_clip.project_point3(vec3(x, y, 0.0));
         Some(Ray { origin: near, direction: (far - near).normalize() })
     }
 }
@@ -145,6 +172,7 @@ struct Device {
     index: usize,
     highlight: f32,
     glow: f32,
+    preview_visible: bool,
 }
 
 /// 기기의 모형 한 조각 — Windows 는 모니터(주)와 타워 둘이다.
@@ -167,6 +195,38 @@ impl Part {
 
     fn asset(&self) -> Option<&'static catalog::Asset> {
         self.asset.map(|i| &catalog::library().assets[i])
+    }
+
+    fn face(&self) -> (Vec3, Vec2, f32, f32) {
+        let (mut face, mut size, yaw, pitch) = self.model.face();
+        if let Some((center, half)) = self.bounds {
+            let (nominal_center, nominal_half) = self.model.hull();
+            let ratio = half / nominal_half;
+            face = center + (face - nominal_center) * ratio;
+            size *= vec2(ratio.x, ratio.y);
+        }
+        (face, size, yaw, pitch)
+    }
+
+    fn screen(&self) -> Option<(Vec3,Vec3)> {
+        self.asset()?.geometry.as_ref()?.screen
+    }
+
+    fn screen_quad(&self) -> [Vec3;4] {
+        let (mut face, size, _, pitch) = self.face();
+        let side = Vec3::X * size.x * 0.5;
+        let up = vec3(0.0, pitch.cos(), -pitch.sin()) * size.y * 0.5;
+        if let Some((center,half)) = self.bounds {
+            face.z = face.z.max(center.z + half.z + up.z.abs() + 0.01);
+        }
+        [face-side-up, face+side-up, face+side+up, face-side+up]
+    }
+
+    fn screen_box(&self) -> (Vec3,Vec3) {
+        self.screen().unwrap_or_else(|| {
+            let [a,b,c,d] = self.screen_quad();
+            (a.min(b).min(c).min(d),a.max(b).max(c).max(d))
+        })
     }
 
     fn top(&self) -> Vec3 {
@@ -219,13 +279,27 @@ impl Layout {
             parts.push(mini);
             parts.push(Part::new(i, &page_machines[i], Model::Monitor, vec3(x - 0.65, mesh::DESK_Y, -0.4)));
         }
-        let devices = (0..page_machines.len()).map(|i| Device { index: first + i, highlight: 0.0, glow: 0.0 }).collect();
+        let devices = (0..page_machines.len()).map(|i| Device { index: first + i, highlight: 0.0, glow: 0.0, preview_visible: false }).collect();
         Self { window, home: home_view(&plan, window), plan, devices, parts }
     }
 
     fn computer_asset(&self, device: usize) -> Option<&'static catalog::Asset> {
         self.parts.iter().find(|p| p.device == device && matches!(p.model, Model::Mini | Model::MiniM4))
             .or_else(|| self.main_part(device)).and_then(Part::asset)
+    }
+
+    fn visible_screens(&self, frame: &Frame, targets: &mut Vec<(usize,f32)>) {
+        targets.clear();
+        for part in self.parts.iter().filter(|p| p.main) {
+            let (lo, hi) = part.screen_box();
+            let toward_camera = (frame.camera - part.position - (lo+hi)*0.5).normalize_or_zero();
+            let (_, _, _, tilt) = part.model.face();
+            // Leave a margin for the sides of curved displays when viewed nearly edge-on.
+            if toward_camera.dot(vec3(0.0, tilt.sin(), tilt.cos())) < -0.30 { continue; }
+            if let Some(pixels) = frame.footprint(part.position + lo, part.position + hi) {
+                targets.push((self.devices[part.device].index, pixels.visible));
+            }
+        }
     }
 
     fn main_part(&self, device: usize) -> Option<&Part> {
@@ -240,9 +314,12 @@ impl Layout {
         let ray = frame.ray(pointer)?;
         self.parts.iter().filter_map(|part| {
             let device = &self.devices[part.device];
-            let (center, half) = part.bounds?;
-            let center = part.position + center;
-            ray.hit_box(center - half, center + half).map(|t| (t, device.index))
+            let (lo, hi) = match part.bounds {
+                Some((center,half)) => (center-half,center+half),
+                None if part.main && device.preview_visible => part.screen_box(),
+                None => return None,
+            };
+            ray.hit_box(part.position+lo, part.position+hi).map(|t| (t, device.index))
         }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, index)| index)
     }
 
@@ -250,20 +327,16 @@ impl Layout {
     fn anchors(&self, frame: &Frame) -> Vec<(usize, Vec2)> {
         self.devices.iter().enumerate().filter_map(|(d, device)| {
             let part = self.main_part(d)?;
-            Some((device.index, frame.visible(part.position + part.top() + Vec3::Y * 0.35)?))
+            let mut top = part.top();
+            if device.preview_visible && part.bounds.is_none() { top.y = part.screen_box().1.y; }
+            Some((device.index, frame.visible(part.position + top + Vec3::Y * 0.35)?))
         }).collect()
     }
 
     /// 그 기기 화면 바로 앞.
     fn dive_view(&self, index: usize) -> Option<View> {
         let part = self.main_part(self.device_of(index)?)?;
-        let (mut face, mut size, yaw, pitch) = part.model.face();
-        if let Some((center, half)) = part.bounds {
-            let (nominal_center, nominal_half) = part.model.hull();
-            let ratio = half / nominal_half;
-            face = center + (face - nominal_center) * ratio;
-            size *= vec2(ratio.x, ratio.y);
-        }
+        let (face, size, yaw, pitch) = part.face();
         let aspect = self.window.0 / self.window.1.max(1.0);
         let half = (size.y * 0.5 / 0.62).max(size.x * 0.5 / 0.84 / aspect);
         Some(View { target: part.position + face, yaw, pitch, half })
@@ -317,6 +390,7 @@ pub struct Room {
     arrived: Option<usize>,
     tags: Vec<(Rect, usize)>,
     weather_link: Option<Rect>,
+    preview_targets: Vec<(usize, f32)>,
 }
 
 impl Room {
@@ -331,7 +405,10 @@ impl Room {
             self.keyboard = None;
         }
         self.page = key.map_or(self.page.min(last_page(machines.len())), |i| i / PAGE);
-        self.layout = Some(Layout::new(window, machines, self.page));
+        let layout = Layout::new(window, machines, self.page);
+        let frame = self.free.unwrap_or_else(|| layout.home.with_look(self.look)).frame(window);
+        layout.visible_screens(&frame, &mut self.preview_targets);
+        self.layout = Some(layout);
         self.tags.clear();
         if self.dive.as_ref().is_some_and(|d| self.layout.as_ref().and_then(|l| l.device_of(d.index)).is_none()) {
             self.dive = None;
@@ -585,9 +662,8 @@ impl Room {
         }
     }
 
-    pub fn has_screen(&self, index: usize) -> bool {
-        self.layout.as_ref().and_then(|l| l.main_part(l.device_of(index)?)).and_then(Part::asset)
-            .and_then(|a| a.geometry.as_ref()?.screen).is_some()
+    pub fn preview_targets(&self) -> &[(usize, f32)] {
+        &self.preview_targets
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -692,7 +768,7 @@ impl Room {
     #[allow(clippy::too_many_arguments)]
     pub fn paint(
         &mut self,
-        preview: Option<(usize, &crate::preview::Picture)>,
+        previews: &[(usize, std::sync::Arc<crate::preview::Picture>)],
         rgb: Option<(usize, &crate::rgb::Snapshot)>,
         editing: Option<(usize, usize)>,
         g: &mut GridRenderer,
@@ -714,6 +790,7 @@ impl Room {
         let paging = self.paging(machines.len());
         let Some(layout) = &mut self.layout else { return g.render(0.0, true, |_, _, _, _, _, _| {}) };
         for device in &mut layout.devices {
+            device.preview_visible = previews.iter().any(|(i,_)| *i == device.index);
             device.glow = if live.get(device.index).copied().unwrap_or(false) { 1.0 } else { 0.0 };
         }
         let layout = &*layout;
@@ -724,6 +801,7 @@ impl Room {
         let mut frame = view.frame(layout.window);
         frame.rain_time = self.rain_time as f32;
         frame.weather = weather.conditions().uniform();
+        layout.visible_screens(&frame, &mut self.preview_targets);
         let calm = 1.0 - dive.map_or(0.0, |(_, t, _)| smooth(0.0, 0.3, t));
 
         let home = home_view.frame(layout.window);
@@ -853,7 +931,7 @@ impl Room {
         let gpu = &mut self.gpu;
         let result = g.render_with_underlay(0.0, true, |device, queue, encoder, texture, target, format| {
             gpu.get_or_insert_with(|| gpu::RoomGpu::new(device, queue, format))
-                .draw(device, queue, encoder, texture, target, layout, &frame, preview, rgb);
+                .draw(device, queue, encoder, texture, target, layout, &frame, previews, rgb);
         });
         self.tags = tags;
         if self.keyboard.is_none() && self.dive.is_none() && self.dragging.is_none() {
@@ -1038,6 +1116,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn distant_layers_remain_distinct_and_bounds_behind_the_eye_are_culled() {
+        let frame = View { target: Vec3::ZERO, yaw: 0.0, pitch: 0.0, half: 35.0 }.frame((1280.0,800.0));
+        let project_z = |offset| frame.clip_from_world.project_point3(frame.camera - Vec3::Z * offset).z;
+        assert!(project_z(135.0) > project_z(135.0005));
+        let behind = frame.camera + Vec3::Z * 4.0;
+        assert!(frame.footprint(behind-Vec3::ONE,behind+Vec3::ONE).is_none());
+        assert!(frame.footprint(-Vec3::ONE,Vec3::ONE).is_some());
     }
 
     #[test]

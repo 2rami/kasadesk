@@ -1,5 +1,8 @@
 // 재질 번호는 mesh.rs `mat` 과 같다. 빛은 선형 공간에서 셈해 sRGB 로 내보낸다(창 표면은 sRGB 접미가 없는 형식이다).
 
+const BARE_SCREEN = 160.0;
+struct PreviewScreen { rect: vec4f, size: vec4f };
+
 struct Scene {
     clip_from_world: mat4x4<f32>,
     sun_clip: mat4x4<f32>,
@@ -11,7 +14,7 @@ struct Scene {
     bench: vec4<f32>,
     landscape: vec4<f32>,
     windows: vec4<f32>,
-    preview_rect: vec4<f32>,
+    screens: array<PreviewScreen,10>,
     fan_colors: array<vec4<f32>,12>,
 };
 
@@ -21,7 +24,7 @@ struct Scene {
 
 @group(0) @binding(3) var products: texture_2d_array<f32>;
 
-@group(0) @binding(4) var preview_image: texture_2d<f32>;
+@group(0) @binding(4) var preview_image: texture_2d_array<f32>;
 
 @group(0) @binding(5) var kraken_lcd: texture_2d<f32>;
 
@@ -31,7 +34,7 @@ struct Scene {
 @vertex
 fn project_sky(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     let vertices = array(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
-    return vec4<f32>(vertices[i], 1.0, 1.0);
+    return vec4<f32>(vertices[i], 0.0, 1.0);
 }
 
 fn panorama_uv(direction: vec3f) -> vec2f {
@@ -177,7 +180,7 @@ fn rain_on_glass(ray: vec3f) -> vec3f {
 fn horizon(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = pixel.xy / scene.viewport.xy;
     let ndc = uv * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0);
-    let point = scene.world_from_clip * vec4f(ndc, 0.95, 1.0);
+    let point = scene.world_from_clip * vec4f(ndc, 0.05, 1.0);
     let ray = normalize(point.xyz / point.w - scene.camera.xyz);
     let sky_uv = moving_clouds(panorama_uv(landscape_direction(ray)));
     var photo = river_sky(sky_uv);
@@ -315,22 +318,49 @@ fn out(c: vec3<f32>, a: f32) -> vec4<f32> {
     return vec4<f32>(pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2)), a);
 }
 
+fn preview_tap(pixel: vec2f, size: vec2f, layer: u32) -> vec3f {
+    let coord = clamp(pixel, vec2f(0.5), size - 0.5) / vec2f(textureDimensions(preview_image));
+    return textureSampleLevel(preview_image, linear_sampler, coord, i32(layer), 0.0).rgb;
+}
+
+fn preview_color(layer: u32, xy: vec2f, dx: vec2f, dy: vec2f) -> vec4f {
+    let rect = scene.screens[layer].rect;
+    let size = scene.screens[layer].size.xy;
+    let ratio = (rect.z / rect.w) * (size.y / size.x);
+    let stretch = max(vec2f(ratio, 1.0/ratio), vec2f(1.0));
+    let uv = (vec2f(xy.x, 1.0-xy.y) - 0.5) * stretch + 0.5;
+    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) { return vec4f(0.012,0.014,0.018,1.0); }
+    let pixel = uv * (size - 1.0) + 0.5;
+    let scale = stretch * (size - 1.0) * vec2f(1.0,-1.0);
+    let x = dx * scale;
+    let y = dy * scale;
+    if max(dot(x,x), dot(y,y)) > 2.25 {
+        let a = 0.25 * (x+y);
+        let b = 0.25 * (x-y);
+        return vec4f(0.25 * (preview_tap(pixel+a,size,layer) + preview_tap(pixel-a,size,layer)
+                           + preview_tap(pixel+b,size,layer) + preview_tap(pixel-b,size,layer)), 1.0);
+    }
+    return vec4f(preview_tap(pixel,size,layer), 1.0);
+}
+
 @fragment
 fn shade(s: Surface) -> @location(0) vec4<f32> {
     let mode = s.material.w;
     let base = lin(s.material.rgb);
     let n = normalize(s.normal + vec3<f32>(0.0, 1e-5, 0.0));
+    let uv_dx = dpdx(s.uv);
+    let uv_dy = dpdy(s.uv);
+    let local_dx = dpdx(s.local.xy);
+    let local_dy = dpdy(s.local.xy);
+    if mode >= BARE_SCREEN { return preview_color(u32(mode - BARE_SCREEN), s.uv, uv_dx, uv_dy); }
     if mode >= 32.0 {
-        let tex = textureSampleLevel(products, linear_sampler, s.uv, i32(mode - 32.0) % 32, 0.0).rgb;
         if mode >= 96.0 && s.preview > 0.5 {
-            let rect = scene.preview_rect;
+            let layer = u32(s.preview) - 1u;
+            let rect = scene.screens[layer].rect;
             let xy = (s.local.xy - rect.xy) / rect.zw;
-            let ratio = (rect.z / rect.w) * (scene.viewport.w / scene.viewport.z);
-            let uv = (vec2<f32>(xy.x, 1.0-xy.y) - 0.5) * max(vec2<f32>(ratio, 1.0/ratio), vec2<f32>(1.0)) + 0.5;
-            if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { return vec4<f32>(0.012,0.014,0.018,1.0); }
-            let coord = (uv * (scene.viewport.zw - 1.0) + 0.5) / vec2<f32>(textureDimensions(preview_image));
-            return vec4<f32>(textureSampleLevel(preview_image, linear_sampler, coord, 0.0).rgb, 1.0);
+            return preview_color(layer, xy, local_dx/rect.zw, local_dy/rect.zw);
         }
+        let tex = textureSampleGrad(products, linear_sampler, s.uv, i32(mode - 32.0) % 32, uv_dx, uv_dy).rgb;
         if (i32(mode - 32.0) / 32) % 2 == 1 { return vec4<f32>(s.material.rgb * tex * (0.65 + 0.35 * s.glow), 1.0); }
         return out(light(s, n, base * lin(tex)), 1.0);
     }

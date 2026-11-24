@@ -11,15 +11,16 @@ use super::mesh::{Model, Vertex};
 use crate::roster::{DeviceKind, Machine};
 
 pub const ATLAS_EDGE: u32 = 1024;
+// Limit the filter footprint because neighboring atlas tiles use different materials.
+pub const ATLAS_MIPS: u32 = 5;
 pub const VENDOR_MATERIAL: f32 = 32.0;
 
 pub struct Geometry {
-    pub vertices: Vec<Vertex>,
-    pub opaque_count: usize,
-    pub atlas: Vec<u8>,
+    pub mesh: super::lod::IndexedModel,
+    pub atlas: Vec<image::RgbaImage>,
     pub center: Vec3,
     pub half: Vec3,
-    pub screen: Option<[f32; 4]>,
+    pub screen: Option<(Vec3, Vec3)>,
 }
 
 pub struct Asset {
@@ -86,7 +87,7 @@ impl Catalog {
             });
             let geometry = if let Some(path) = file.map(|f| dir.join(f)).filter(|p| p.is_file()) {
                 match Geometry::load(&path, model, assets.len(), remaining_vertices, value["width_m"].as_f64(), value["screen_offset_m"].as_f64().unwrap_or(0.0)) {
-                    Ok(g) => { remaining_vertices -= g.vertices.len(); Some(g) }
+                    Ok(g) => { remaining_vertices -= g.mesh.body.len() + g.mesh.glass.len(); Some(g) }
                     Err(e) => { eprintln!("[models] {key}: {e:#}"); None }
                 }
             } else { None };
@@ -173,10 +174,17 @@ impl Geometry {
         f.read_exact(&mut png)?;
         let reader = image::ImageReader::with_format(std::io::Cursor::new(&png), image::ImageFormat::Png);
         if reader.into_dimensions()? != (ATLAS_EDGE, ATLAS_EDGE) { bail!("unexpected atlas dimensions") }
-        let atlas = image::load_from_memory_with_format(&png, image::ImageFormat::Png)?.into_rgba8().into_raw();
+        let mut atlas = vec![image::load_from_memory_with_format(&png, image::ImageFormat::Png)?.into_rgba8()];
+        for level in 1..ATLAS_MIPS {
+            let edge = ATLAS_EDGE >> level;
+            atlas.push(image::imageops::resize(atlas.last().unwrap(), edge, edge, image::imageops::FilterType::Triangle));
+        }
         let screen = (screen_hi.x > screen_lo.x && screen_hi.y > screen_lo.y).then(||
-            [screen_lo.x, screen_lo.y, screen_hi.x - screen_lo.x, screen_hi.y - screen_lo.y]);
-        Ok(Self { opaque_count: vertices.len(), vertices, atlas, screen, center: (lo + hi) / 2.0, half: (hi - lo) / 2.0 })
+            (screen_lo, screen_hi));
+        let center = (lo+hi)*0.5;
+        let half = (hi-lo)*0.5;
+        let mesh = super::lod::IndexedModel::new(&vertices, vertices.len(), center, half);
+        Ok(Self { mesh, atlas, screen, center, half })
     }
 }
 
@@ -191,11 +199,14 @@ mod tests {
         let catalog = Catalog::open(&missing).unwrap();
         let geometry = catalog.assets[catalog.indices["hyte-y60"]].geometry.as_ref().unwrap();
         assert!((geometry.half.y * 2.0 * 127.0 - 462.0).abs() < 0.1);
-        let (body, glass) = geometry.vertices.split_at(geometry.opaque_count);
-        assert!(body.iter().all(|v| v.material[3] != 15.0));
+        let m = &geometry.mesh;
+        let body = &m.indices[m.body.start as usize..m.body.end as usize];
+        let glass = &m.indices[m.glass.start as usize..m.glass.end as usize];
+        assert!(m.far.len() < body.len());
+        assert!(body.iter().all(|&i| m.vertices[i as usize].material[3] != 15.0));
         assert_eq!(glass.len(), 3 * 6);
-        assert!(glass.iter().all(|v| v.material[3] == 15.0));
-        assert!(geometry.vertices.iter().all(|v| Vec3::from_array(v.normal).is_finite()));
+        assert!(glass.iter().all(|&i| m.vertices[i as usize].material[3] == 15.0));
+        assert!(m.vertices.iter().all(|v| Vec3::from_array(v.normal).is_finite()));
     }
 
     #[test]

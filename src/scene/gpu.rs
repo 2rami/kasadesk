@@ -5,13 +5,16 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use glam::{Mat4, Vec3, vec3};
 
-use super::{catalog, mesh};
+use super::{catalog, mesh, PAGE};
 use std::ops::Range;
 use super::{Frame, Layout};
 
 const VERTEX_ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 6 => Float32x2];
 const INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32, 5 => Float32, 7 => Float32, 8 => Float32];
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+// Four vendor flag combinations occupy material IDs 32 through 159.
+const BARE_SCREEN: f32 = 160.0;
+const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Instance {
@@ -35,15 +38,43 @@ struct Scene {
     bench: [f32; 4],
     landscape: [f32; 4],
     windows: [f32; 4],
-    preview_rect: [f32; 4],
+    screens: [PreviewScreen; PAGE],
     fan_colors: [[f32; 4]; 12],
 }
 
-#[derive(Default)]
-struct ProductRanges {
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
+struct PreviewScreen {
+    rect: [f32; 4],
+    size: [f32; 4],
+}
+
+struct Product {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
     body: Range<u32>,
+    far: Range<u32>,
     glass: Range<u32>,
     contact: Range<u32>,
+}
+
+impl Product {
+    fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+    }
+}
+
+struct Batch {
+    near: Range<u32>,
+    far: Range<u32>,
+    all: Range<u32>,
+}
+
+struct Targets {
+    size: wgpu::Extent3d,
+    depth: wgpu::TextureView,
+    color: Option<wgpu::TextureView>,
 }
 
 pub struct RoomGpu {
@@ -60,11 +91,13 @@ pub struct RoomGpu {
     lcd_texture: wgpu::Texture,
     lcd_serial: u64,
     preview_texture: wgpu::Texture,
-    preview_serial: u64,
-    products: wgpu::Buffer,
-    ranges: Vec<ProductRanges>,
+    bare_screens: wgpu::Buffer,
+    preview_serial: [u64; PAGE],
+    products: Vec<Option<Product>>,
+    samples: u32,
+    far_detail: Vec<bool>,
     instances: Option<(usize, wgpu::Buffer)>,
-    depth: Option<(wgpu::Extent3d, wgpu::TextureView)>,
+    targets: Option<Targets>,
 }
 
 impl RoomGpu {
@@ -95,50 +128,48 @@ impl RoomGpu {
         }, wgpu::util::TextureDataOrder::LayerMajor, plate.as_raw());
         let texture_view = texture.create_view(&Default::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default()
+            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, mipmap_filter: wgpu::MipmapFilterMode::Linear, anisotropy_clamp: 4, ..Default::default()
         });
         let library = catalog::library();
         let model_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("KasaDesk product atlases"),
             size: wgpu::Extent3d { width: catalog::ATLAS_EDGE, height: catalog::ATLAS_EDGE,
                 depth_or_array_layers: library.assets.len().max(1) as u32 },
-            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            mip_level_count: catalog::ATLAS_MIPS, sample_count: 1, dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let atlas_view = model_texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default()
         });
-        let count: usize = library.assets.iter().filter_map(|a| a.geometry.as_ref()).map(|g| g.vertices.len() + 6).sum();
-        let stride = std::mem::size_of::<mesh::Vertex>() as u64;
-        let products = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("KasaDesk product geometry"), size: count.max(1) as u64 * stride,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
-        });
-        let mut ranges = Vec::new();
-        let mut start = 0;
-        for (layer, asset) in library.assets.iter().enumerate() {
-            let Some(g) = &asset.geometry else { ranges.push(ProductRanges::default()); continue };
-            let end = start + g.vertices.len() as u32;
-            queue.write_buffer(&products, u64::from(start) * stride, bytemuck::cast_slice(&g.vertices));
-            let contact = mesh::contact(g.center, g.half);
-            queue.write_buffer(&products, u64::from(end) * stride, bytemuck::cast_slice(&contact));
-            let next = end + contact.len() as u32;
-            let glass_start = start + g.opaque_count as u32;
-            ranges.push(ProductRanges { body: start..glass_start, glass: glass_start..end, contact: end..next });
-            start = next;
-            if g.atlas.is_empty() { continue; }
-            queue.write_texture(wgpu::TexelCopyTextureInfo {
-                texture: &model_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 }, aspect: wgpu::TextureAspect::All,
-            }, &g.atlas, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * catalog::ATLAS_EDGE), rows_per_image: None },
-                wgpu::Extent3d { width: catalog::ATLAS_EDGE, height: catalog::ATLAS_EDGE, depth_or_array_layers: 1 });
-        }
+        let products = library.assets.iter().enumerate().map(|(layer, asset)| {
+            let g = asset.geometry.as_ref()?;
+            for (level, image) in g.atlas.iter().enumerate() {
+                queue.write_texture(wgpu::TexelCopyTextureInfo {
+                    texture: &model_texture, mip_level: level as u32, origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                    aspect: wgpu::TextureAspect::All,
+                }, image.as_raw(), wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4*image.width()), rows_per_image: None },
+                    wgpu::Extent3d { width: image.width(), height: image.height(), depth_or_array_layers: 1 });
+            }
+            let m = &g.mesh;
+            let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("KasaDesk product vertices"), usage: wgpu::BufferUsages::VERTEX, contents: bytemuck::cast_slice(&m.vertices),
+            });
+            let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("KasaDesk product detail levels"), usage: wgpu::BufferUsages::INDEX, contents: bytemuck::cast_slice(&m.indices),
+            });
+            Some(Product { vertices, indices, body: m.body.clone(), far: m.far.clone(), glass: m.glass.clone(), contact: m.contact.clone() })
+        }).collect();
         let preview_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("KasaDesk preview"), size: wgpu::Extent3d { width: crate::preview::WIDTH, height: crate::preview::HEIGHT, depth_or_array_layers: 1 },
+            label: Some("KasaDesk preview"), size: wgpu::Extent3d { width: crate::preview::WIDTH, height: crate::preview::HEIGHT, depth_or_array_layers: PAGE as u32 },
             mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
         });
-        let preview_view = preview_texture.create_view(&Default::default());
+        let bare_screens = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("KasaDesk screens without a model"), size: (PAGE*6*std::mem::size_of::<mesh::Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let preview_view = preview_texture.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
         let lcd_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Kraken LCD"),
             size: wgpu::Extent3d { width: 192, height: 192, depth_or_array_layers: 1 },
@@ -171,7 +202,7 @@ impl RoomGpu {
             }, wgpu::BindGroupLayoutEntry {
                 binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None,
+                    view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false }, count: None,
             }, wgpu::BindGroupLayoutEntry {
                 binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -192,7 +223,7 @@ impl RoomGpu {
         let shadow_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("KasaDesk sunlight depth"),
             size: wgpu::Extent3d { width: 1536, height: 1536, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: DEPTH_FORMAT,
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: SHADOW_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
         }).create_view(&Default::default());
         let comparison = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -227,11 +258,15 @@ impl RoomGpu {
             vertex: wgpu::VertexState { module: &shader, entry_point: Some("project_shadow"), buffers: &buffers, compilation_options: Default::default() },
             primitive: Default::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::LessEqual,
+                format: SHADOW_FORMAT, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::LessEqual,
                 bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 }, stencil: Default::default(),
             }),
             multisample: Default::default(), fragment: None, multiview_mask: None, cache: None,
         });
+        let flags = |f: wgpu::TextureFormat| f.guaranteed_format_features(device.features()).flags;
+        let msaa = flags(format).contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
+            && flags(format).sample_count_supported(4) && flags(DEPTH_FORMAT).sample_count_supported(4);
+        let samples = if msaa { 4 } else { 1 };
         let pipeline = |depth_write, backdrop| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("KasaDesk room pipeline"),
@@ -246,11 +281,11 @@ impl RoomGpu {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: depth_write,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    depth_compare: wgpu::CompareFunction::GreaterEqual,
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: Default::default(),
+                multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some(if backdrop { "horizon" } else { "shade" }),
@@ -291,11 +326,13 @@ impl RoomGpu {
             lcd_texture,
             lcd_serial: 0,
             preview_texture,
-            preview_serial: 0,
+            bare_screens,
+            preview_serial: [0; PAGE],
             products,
-            ranges,
+            samples,
+            far_detail: Vec::new(),
             instances: None,
-            depth: None,
+            targets: None,
         }
     }
 
@@ -309,22 +346,17 @@ impl RoomGpu {
         view: &wgpu::TextureView,
         layout: &Layout,
         frame: &Frame,
-        preview: Option<(usize, &crate::preview::Picture)>,
+        previews: &[(usize, std::sync::Arc<crate::preview::Picture>)],
         rgb: Option<(usize, &crate::rgb::Snapshot)>,
     ) {
         let size = texture.size();
-        if self.depth.as_ref().is_none_or(|(old, _)| *old != size) {
-            let depth = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("KasaDesk room depth"),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            self.depth = Some((size, depth.create_view(&Default::default())));
+        if self.targets.as_ref().is_none_or(|t| t.size != size) {
+            let attachment = |label, format| device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label), size, mip_level_count: 1, sample_count: self.samples, dimension: wgpu::TextureDimension::D2,
+                format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT, view_formats: &[],
+            }).create_view(&Default::default());
+            self.targets = Some(Targets { size, depth: attachment("KasaDesk depth", DEPTH_FORMAT),
+                color: (self.samples > 1).then(|| attachment("KasaDesk MSAA color", texture.format())) });
         }
         let new_room = self.room.as_ref().is_none_or(|(plan, _, _)| *plan != layout.plan);
         if new_room {
@@ -356,22 +388,31 @@ impl RoomGpu {
                 self.lcd_serial = snap.serial;
             }
         }
-        let mut preview_rect = [0.0; 4];
-        let mut preview_size = (0, 0);
-        if let Some((index, pic)) = preview {
-            if let Some(rect) = layout.device_of(index).and_then(|i| layout.main_part(i)).and_then(|p| p.asset())
-                .and_then(|a| a.geometry.as_ref()?.screen) {
-                preview_rect = rect;
-                preview_size = pic.size;
-                if self.preview_serial != pic.serial {
-                    let (w,h) = pic.size;
-                    queue.write_texture(self.preview_texture.as_image_copy(), &pic.rgba, wgpu::TexelCopyBufferLayout {
-                        offset: 0, bytes_per_row: Some(4*w), rows_per_image: None,
-                    }, wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
-                    self.preview_serial = pic.serial;
+        let mut screens = [PreviewScreen::default(); PAGE];
+        let mut bare = Vec::new();
+        for (index, pic) in previews {
+            let Some(slot) = layout.device_of(*index) else { continue };
+            let Some(part) = layout.main_part(slot) else { continue };
+            let (lo,hi) = part.screen_box();
+            if part.screen().is_none() {
+                let quad = part.screen_quad();
+                let uv = [[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]];
+                for corner in [0,1,2,0,2,3] {
+                    bare.push(mesh::Vertex { point: (part.position + quad[corner]).to_array(), normal: [0.0,0.0,1.0],
+                        material: [1.0,1.0,1.0,BARE_SCREEN + slot as f32], uv: uv[corner] });
                 }
             }
+            let (w,h) = pic.size;
+            screens[slot] = PreviewScreen { rect: [lo.x,lo.y,hi.x-lo.x,hi.y-lo.y], size: [w as f32,h as f32,0.0,0.0] };
+            if self.preview_serial[slot] != pic.serial {
+                queue.write_texture(wgpu::TexelCopyTextureInfo {
+                    texture: &self.preview_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: slot as u32 }, aspect: wgpu::TextureAspect::All,
+                }, &pic.rgba, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4*w), rows_per_image: None },
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
+                self.preview_serial[slot] = pic.serial;
+            }
         }
+        if !bare.is_empty() { queue.write_buffer(&self.bare_screens, 0, bytemuck::cast_slice(&bare)); }
         queue.write_buffer(&self.scene, 0, bytemuck::bytes_of(&Scene {
             clip_from_world: frame.clip_from_world.to_cols_array_2d(),
             sun_clip: sun_clip.to_cols_array_2d(),
@@ -379,23 +420,40 @@ impl RoomGpu {
             camera: frame.camera.extend(1.0).to_array(),
             lighting: [frame.day, frame.dusk, frame.indoor, frame.rain_time],
             weather: frame.weather,
-            viewport: [size.width as f32, size.height as f32, preview_size.0 as f32, preview_size.1 as f32],
-            preview_rect, fan_colors:rgb.map_or([[0.0;4];12],|(_,s)|s.lights()),
+            viewport: [size.width as f32, size.height as f32, 0.0, 0.0],
+            screens, fan_colors:rgb.map_or([[0.0;4];12],|(_,s)|s.lights()),
             bench: [left, right, mesh::DESK_Y, room_lo.z],
             landscape: [target.x, 12.0, room_lo.z, landscape_radius],
             windows: [room_lo.x, room_hi.x, room_hi.y, layout.plan.side_window_end()],
         }));
         // 방 한 칸 + 모형 종류마다 줄 세운 기기 자리.
         let mut data = vec![Instance { position: [0.0; 3], highlight: 0.0, glow: 0.0, preview: 0.0, rgb: 0.0 }];
-        let mut ranges = Vec::new();
-        for index in 0..self.ranges.len() {
+        self.far_detail.resize(layout.parts.len(), false);
+        let mut batches = Vec::with_capacity(self.products.len());
+        for index in 0..self.products.len() {
             let start = data.len() as u32;
-            for (part, device) in layout.parts.iter().filter(|p| p.asset == Some(index)).map(|p| (p, &layout.devices[p.device])) {
-                data.push(Instance { position: part.position.to_array(), highlight: device.highlight, glow: device.glow,
-                    rgb:rgb.filter(|(i,_)|*i==device.index && part.model==mesh::Model::Tower).map_or(0.0,|(_,s)|if s.lcd.is_some(){2.0}else{1.0}),
-                    preview: f32::from(part.main && preview_size.0 != 0 && preview.is_some_and(|(i,_)| i == device.index)) });
+            let mut groups: [Vec<Instance>; 3] = Default::default();
+            for (part_index,part) in layout.parts.iter().enumerate().filter(|(_,p)| p.asset == Some(index)) {
+                let device = &layout.devices[part.device];
+                let Some((center,half)) = part.bounds else { continue };
+                let center = part.position + center;
+                let group = match frame.footprint(center-half,center+half) {
+                    Some(size) => {
+                        // Hysteresis keeps a slow camera sway from alternating index buffers.
+                        let threshold = if self.far_detail[part_index] { 240.0 } else { 210.0 };
+                        self.far_detail[part_index] = size.full < threshold;
+                        usize::from(self.far_detail[part_index])
+                    }
+                    None => 2,
+                };
+                let preview = if part.main && screens[part.device].size[0] > 0.0 { (part.device+1) as f32 } else { 0.0 };
+                groups[group].push(Instance { position: part.position.to_array(), highlight: device.highlight, glow: device.glow,
+                    rgb:rgb.filter(|(i,_)|*i==device.index && part.model==mesh::Model::Tower).map_or(0.0,|(_,s)|if s.lcd.is_some(){2.0}else{1.0}), preview });
             }
-            ranges.push(start..data.len() as u32);
+            let middle = start + groups[0].len() as u32;
+            let visible = middle + groups[1].len() as u32;
+            for group in groups { data.extend(group); }
+            batches.push(Batch { near: start..middle, far: middle..visible, all: start..data.len() as u32 });
         }
         if self.instances.as_ref().is_none_or(|(cap, _)| *cap < data.len()) {
             let cap = data.len().next_power_of_two().max(16);
@@ -407,7 +465,7 @@ impl RoomGpu {
             });
             self.instances = Some((cap, buffer));
         }
-        let (Some((_, instances)), Some((_, vertices, room_count)), Some((_, depth))) = (&self.instances, &self.room, &self.depth) else { return };
+        let (Some((_, instances)), Some((_, vertices, room_count)), Some(targets)) = (&self.instances, &self.room, &self.targets) else { return };
         queue.write_buffer(instances, 0, bytemuck::cast_slice(&data));
         // Only placement changes the shadow silhouette. Rain and selection animate independently.
         let placements = || layout.parts.iter().filter_map(|p| Some((p.asset?, p.position.to_array())));
@@ -428,22 +486,24 @@ impl RoomGpu {
             pass.set_vertex_buffer(1, instances.slice(..));
             pass.set_bind_group(0, &self.binding, &[]);
             pass.draw(0..*room_count, 0..1);
-            pass.set_vertex_buffer(0, self.products.slice(..));
-            for (product, range) in self.ranges.iter().zip(&ranges) {
-                if !range.is_empty() { pass.draw(product.body.clone(), range.clone()); }
+            for (model, batch) in self.products.iter().zip(&batches) {
+                if let Some(m) = model.as_ref().filter(|_| !batch.all.is_empty()) {
+                    m.bind(&mut pass);
+                    pass.draw_indexed(m.body.clone(), 0, batch.all.clone());
+                }
             }
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("KasaDesk room"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
+                view: targets.color.as_ref().unwrap_or(view),
                 depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                resolve_target: targets.color.as_ref().map(|_| view),
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: if targets.color.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                view: &targets.depth,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Discard }),
                 stencil_ops: None,
             }),
             timestamp_writes: None,
@@ -456,24 +516,31 @@ impl RoomGpu {
         pass.set_bind_group(1, &self.shadow_binding, &[]);
         pass.set_pipeline(&self.solid);
         pass.draw(0..*room_count, 0..1);
-        pass.set_vertex_buffer(0, self.products.slice(..));
-        for (product, range) in self.ranges.iter().zip(&ranges) {
-            if !range.is_empty() {
-                pass.draw(product.body.clone(), range.clone());
+        if !bare.is_empty() {
+            pass.set_vertex_buffer(0, self.bare_screens.slice(..));
+            pass.draw(0..bare.len() as u32, 0..1);
+        }
+        for (model, batch) in self.products.iter().zip(&batches) {
+            if let Some(m) = model.as_ref().filter(|_| !batch.near.is_empty() || !batch.far.is_empty()) {
+                m.bind(&mut pass);
+                if !batch.near.is_empty() { pass.draw_indexed(m.body.clone(), 0, batch.near.clone()); }
+                if !batch.far.is_empty() { pass.draw_indexed(m.far.clone(), 0, batch.far.clone()); }
             }
         }
         // Let opaque geometry reject covered pixels before evaluating the outdoor weather.
         pass.set_pipeline(&self.backdrop);
         pass.draw(0..3, 0..1);
         pass.set_pipeline(&self.glaze);
-        for (product, range) in self.ranges.iter().zip(&ranges) {
-            if !range.is_empty() {
-                pass.draw(product.contact.clone(), range.clone());
-            }
-        }
-        for (product, range) in self.ranges.iter().zip(&ranges) {
-            if !range.is_empty() && !product.glass.is_empty() {
-                pass.draw(product.glass.clone(), range.clone());
+        for glass in [false,true] {
+            for (model, batch) in self.products.iter().zip(&batches) {
+                let visible = batch.near.start..batch.far.end;
+                if let Some(m) = model.as_ref().filter(|_| !visible.is_empty()) {
+                    let indices = if glass { &m.glass } else { &m.contact };
+                    if !indices.is_empty() {
+                        m.bind(&mut pass);
+                        pass.draw_indexed(indices.clone(), 0, visible);
+                    }
+                }
             }
         }
     }
