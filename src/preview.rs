@@ -1,7 +1,7 @@
 mod thumbnail;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -41,22 +41,66 @@ impl Quality {
         }
     }
 
+    fn motion_fps(self) -> u32 {
+        match self {
+            Self::Far => 15,
+            Self::Middle => 24,
+            Self::Near => 30,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Profile {
+    quality: Quality,
+    fps: u32,
+}
+
+impl Profile {
     fn capture(self) -> Config {
-        let (max_w, max_h, fps) = match self {
-            Self::Far => (192, 120, 1),
-            Self::Middle => (320, 200, 2),
-            Self::Near => (WIDTH, HEIGHT, 3),
+        let (max_w, max_h) = match self.quality {
+            Quality::Far => (192, 120),
+            Quality::Middle => (320, 200),
+            Quality::Near => (WIDTH, HEIGHT),
         };
         Config {
             codec: "h264".into(),
             max_w,
             max_h,
-            fps,
+            fps: self.fps,
             bitrate: 1_000_000,
             audio: false,
             refine: 0,
             ..Config::default()
         }
+    }
+}
+
+// Budget room-wide work across visible peers. Older hosts may ignore the requested size;
+// a second budget applies only to those full-resolution decodes.
+#[derive(Default)]
+struct Budget {
+    frames: u32,
+    large_pixels: u64,
+}
+
+impl Budget {
+    fn count(&mut self, quality: Quality, source_pixels: u32) {
+        self.frames += quality.motion_fps();
+        if source_pixels > WIDTH * HEIGHT {
+            self.large_pixels += u64::from(source_pixels) * u64::from(quality.motion_fps());
+        }
+    }
+
+    fn profile(&self, quality: Quality, source_pixels: u32) -> Profile {
+        const FRAMES: u32 = 96;
+        const PIXELS: u64 = 150_000_000;
+        let rate = quality.motion_fps();
+        let mut fps = rate * FRAMES / self.frames.max(FRAMES);
+        if source_pixels > WIDTH * HEIGHT {
+            fps = fps.min((u64::from(rate) * PIXELS / self.large_pixels.max(PIXELS)) as u32);
+        }
+        Profile { quality, fps: fps.max(1) }
     }
 }
 
@@ -67,15 +111,16 @@ pub struct Picture {
 }
 
 struct Stream {
+    source_pixels: Arc<AtomicU32>,
     watch: Watch,
     denied: Arc<AtomicBool>,
     latest: Arc<Mutex<Option<Arc<Picture>>>>,
 }
 
 impl Stream {
-    fn open(start: Start, quality: Quality, redraw: impl Fn() + Send + Sync + 'static) -> Option<Self> {
+    fn open(start: Start, profile: Profile, redraw: impl Fn() + Send + Sync + 'static) -> Option<Self> {
         let Start::Connect(connect) = start else { return None };
-        let cfg = quality.capture();
+        let cfg = profile.capture();
         let limit = (cfg.max_w as usize, cfg.max_h as usize);
         let (tx, rx) = mpsc::sync_channel(4);
         let redraw = Arc::new(redraw);
@@ -104,6 +149,8 @@ impl Stream {
         let keys = watch.keyframes();
         let latest = Arc::new(Mutex::new(None));
         let dest = latest.clone();
+        let source_pixels = Arc::new(AtomicU32::new(0));
+        let decoded_area = source_pixels.clone();
         std::thread::Builder::new()
             .name("desk-preview".into())
             .spawn(move || {
@@ -121,6 +168,7 @@ impl Stream {
                                     if !thumbnail::fits_input(w as u32, h as u32) || w % 2 != 0 || h % 2 != 0 {
                                         continue;
                                     }
+                                    decoded_area.store((w * h) as u32, Ordering::Relaxed);
                                     let size = thumbnail::fitted(w, h, limit);
                                     let rgba = if size == (w, h) {
                                         let mut rgba = vec![0; w * h * 4];
@@ -150,7 +198,7 @@ impl Stream {
                 }
             })
             .ok()?;
-        Some(Self { watch, latest, denied })
+        Some(Self { watch, latest, denied, source_pixels })
     }
 }
 
@@ -165,7 +213,17 @@ fn append_nal(packet: &mut Vec<u8>, bytes: &[u8]) -> Option<()> {
     }
     // The decoder allocates for coded macroblocks, even when the transport header or crop is smaller.
     if kind == 7 {
-        let sps = SeqParameterSet::from_bits(RefNal::new(bytes, &[], true).rbsp_bits()).ok()?;
+        // H.264 A.3: flag 3 signals level 1b only for Baseline, Main and Extended.
+        // h264-reader 0.9 also applies it to High profiles. Resolve the level for its
+        // bounds check; the decoder still receives the original parameter set.
+        let sps = match bytes {
+            [header, profile @ (100 | 110 | 122 | 244), flags, 11, tail @ ..] if flags & 0x10 != 0 => {
+                let prefix = [*header, *profile, flags & !0x10, 11];
+                SeqParameterSet::from_bits(RefNal::new(&prefix, &[tail], true).rbsp_bits())
+            }
+            _ => SeqParameterSet::from_bits(RefNal::new(bytes, &[], true).rbsp_bits()),
+        }
+        .ok()?;
         let lines = if matches!(sps.frame_mbs_flags, FrameMbsFlags::Frames) { 16 } else { 32 };
         let w = sps.pic_width_in_mbs_minus1.checked_add(1)?.checked_mul(16)?;
         let h = sps.pic_height_in_map_units_minus1.checked_add(1)?.checked_mul(lines)?;
@@ -203,8 +261,9 @@ fn annex_b(frame: &Frame) -> Option<Vec<u8>> {
 struct Feed {
     peer: Option<String>,
     service: Option<String>,
-    quality: Quality,
-    requested: Quality,
+    profile: Profile,
+    requested: Profile,
+    source_pixels: u32,
     due: Option<Instant>,
     stream: Option<Stream>,
     previous: Option<Arc<Picture>>,
@@ -239,20 +298,19 @@ impl Feed {
     fn update(
         &mut self,
         now: Instant,
-        pixels: f32,
+        profile: Profile,
         start: impl FnOnce() -> Start,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> bool {
-        let quality = Quality::for_pixels(pixels, Some(self.quality));
         if self.previous.is_some()
             && self.stream.as_ref().is_some_and(|s| s.latest.lock().unwrap_or_else(|e| e.into_inner()).is_some())
         {
             self.previous = None;
         }
-        if quality != self.requested {
-            self.requested = quality;
+        if profile != self.requested {
+            self.requested = profile;
             if self.stream.is_some() {
-                self.due = (quality != self.quality).then_some(now + Duration::from_millis(650));
+                self.due = (profile != self.profile).then_some(now + Duration::from_millis(650));
             }
         }
         if self.due.is_some_and(|t| now >= t) {
@@ -260,8 +318,8 @@ impl Feed {
             self.previous = self.picture();
             self.stream = None;
             self.denied = false;
-            self.quality = self.requested;
-            self.stream = Stream::open(start(), self.quality, wake);
+            self.profile = self.requested;
+            self.stream = Stream::open(start(), self.profile, wake);
             self.due = self.stream.is_none().then_some(now + Duration::from_secs(4));
             return true;
         }
@@ -301,22 +359,45 @@ impl Previews {
             })
         });
         changed |= self.feeds.len() != before;
+        let mut budget = Budget::default();
+        let mut requests = Vec::with_capacity(visible.len());
         for &(i, pixels) in visible {
             let Some(m) = machines.get(i).filter(|_| live.get(i) == Some(&true)) else { continue };
-            let feed = self.feeds.entry(m.label.clone()).or_insert_with(|| {
-                let quality = Quality::for_pixels(pixels, None);
-                Feed {
-                    peer: m.kasanet["id"].as_str().map(str::to_owned),
-                    service: m.kasanet["screen_node"]["id"].as_str().map(str::to_owned),
-                    quality,
-                    requested: quality,
-                    due: Some(Instant::now() + Duration::from_millis(220)),
-                    stream: None,
-                    previous: None,
-                    denied: false,
+            let existing = self.feeds.get_mut(&m.label);
+            let quality = Quality::for_pixels(pixels, existing.as_ref().map(|f| f.profile.quality));
+            let mut area = 0;
+            if let Some(f) = existing {
+                if let Some(stream) = &f.stream {
+                    let latest = stream.source_pixels.load(Ordering::Relaxed);
+                    if latest != 0 {
+                        f.source_pixels = latest;
+                    }
                 }
+                area = f.source_pixels;
+                if f.denied && f.due.is_some_and(|t| t > now) {
+                    if let Some(at) = f.due {
+                        next = Some(next.map_or(at, |prev| prev.min(at)));
+                    }
+                    continue;
+                }
+            }
+            budget.count(quality, area);
+            requests.push((m, quality, area));
+        }
+        for (m, quality, area) in requests {
+            let profile = budget.profile(quality, area);
+            let feed = self.feeds.entry(m.label.clone()).or_insert_with(|| Feed {
+                peer: m.kasanet["id"].as_str().map(str::to_owned),
+                service: m.kasanet["screen_node"]["id"].as_str().map(str::to_owned),
+                profile,
+                requested: profile,
+                source_pixels: area,
+                due: Some(Instant::now() + Duration::from_millis(220)),
+                stream: None,
+                previous: None,
+                denied: false,
             });
-            changed |= feed.update(now, pixels, || net.start_view(&m.label), wake.clone());
+            changed |= feed.update(now, profile, || net.start_view(&m.label), wake.clone());
             if let Some(at) = feed.due {
                 next = Some(next.map_or(at, |prev| prev.min(at)));
             }
@@ -340,7 +421,35 @@ mod tests {
         assert_eq!(Quality::for_pixels(140.0, Some(Quality::Middle)), Quality::Middle);
         assert_eq!(Quality::for_pixels(270.0, Some(Quality::Near)), Quality::Near);
         assert_eq!(Quality::for_pixels(310.0, Some(Quality::Middle)), Quality::Near);
-        assert!(!Quality::Far.capture().audio && Quality::Far.capture().fps < Quality::Near.capture().fps);
+        assert!(
+            !Budget::default().profile(Quality::Far, 0).capture().audio
+                && Quality::Far.motion_fps() < Quality::Near.motion_fps()
+        );
+    }
+
+    #[test]
+    fn motion_budget_shares_work_without_penalizing_thumbnail_senders_for_legacy_inputs() {
+        let mut budget = Budget::default();
+        budget.count(Quality::Middle, 3840 * 1600);
+        budget.count(Quality::Middle, 320 * 180);
+        assert_eq!(budget.profile(Quality::Middle, 3840 * 1600).fps, 24);
+        let mut uhd = Budget::default();
+        uhd.count(Quality::Near, 3840 * 2160);
+        assert_eq!(uhd.profile(Quality::Near, 3840 * 2160).fps, 18);
+        assert_eq!(budget.profile(Quality::Middle, 320 * 180).fps, 24);
+        for _ in 2..10 {
+            budget.count(Quality::Middle, 320 * 180);
+        }
+        assert!(10 * budget.profile(Quality::Middle, 320 * 180).fps <= 96);
+        assert_eq!(Budget::default().profile(Quality::Near, 0).capture().fps, 30);
+    }
+
+    #[test]
+    fn high_profile_level_11_thumbnail_keeps_its_original_sps() {
+        let sps = [0x67, 0x64, 0x10, 0x0b, 0xac, 0xb8, 0x28, 0x33, 0xf3, 0xc2, 0, 0, 3, 0, 2, 0, 0, 3, 0, 8, 8];
+        let mut packet = Vec::new();
+        append_nal(&mut packet, &sps).unwrap();
+        assert_eq!(&packet[4..], &sps);
     }
 
     #[test]
@@ -350,18 +459,29 @@ mod tests {
         let mut feed = Feed {
             peer: None,
             service: None,
-            quality: Quality::Far,
-            requested: Quality::Far,
+            profile: Budget::default().profile(Quality::Far, 0),
+            requested: Budget::default().profile(Quality::Far, 0),
+            source_pixels: 0,
             due: Some(retry_at),
             stream: None,
             previous: None,
             denied: true,
         };
-        assert!(!feed.update(now, 900.0, || panic!("early permission retry"), || {}));
+        assert!(!feed.update(
+            now,
+            Budget::default().profile(Quality::Near, 0),
+            || panic!("early permission retry"),
+            || {}
+        ));
         assert_eq!(feed.due, Some(retry_at));
-        assert!(feed.update(retry_at, 900.0, || Start::Wait(String::new()), || {}));
+        assert!(feed.update(
+            retry_at,
+            Budget::default().profile(Quality::Near, 0),
+            || Start::Wait(String::new()),
+            || {}
+        ));
         assert!(!feed.denied);
-        assert_eq!(feed.quality, Quality::Near);
+        assert_eq!(feed.profile.quality, Quality::Near);
     }
 
     #[test]

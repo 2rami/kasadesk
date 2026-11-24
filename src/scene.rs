@@ -3,6 +3,7 @@
 mod catalog;
 mod gpu;
 mod mesh;
+mod panel;
 mod lod;
 
 use std::borrow::Cow;
@@ -198,6 +199,10 @@ impl Part {
     }
 
     fn face(&self) -> (Vec3, Vec2, f32, f32) {
+        if let Some(panel) = self.screen() {
+            let n = panel.normal;
+            return (panel.center, panel.size, n.x.atan2(n.z), n.y.clamp(-1.0,1.0).asin());
+        }
         let (mut face, mut size, yaw, pitch) = self.model.face();
         if let Some((center, half)) = self.bounds {
             let (nominal_center, nominal_half) = self.model.hull();
@@ -208,7 +213,7 @@ impl Part {
         (face, size, yaw, pitch)
     }
 
-    fn screen(&self) -> Option<(Vec3,Vec3)> {
+    fn screen(&self) -> Option<panel::Panel> {
         self.asset()?.geometry.as_ref()?.screen
     }
 
@@ -223,7 +228,7 @@ impl Part {
     }
 
     fn screen_box(&self) -> (Vec3,Vec3) {
-        self.screen().unwrap_or_else(|| {
+        self.screen().map(|s| s.bounds).unwrap_or_else(|| {
             let [a,b,c,d] = self.screen_quad();
             (a.min(b).min(c).min(d),a.max(b).max(c).max(d))
         })
@@ -293,9 +298,12 @@ impl Layout {
         for part in self.parts.iter().filter(|p| p.main) {
             let (lo, hi) = part.screen_box();
             let toward_camera = (frame.camera - part.position - (lo+hi)*0.5).normalize_or_zero();
-            let (_, _, _, tilt) = part.model.face();
+            let normal = part.screen().map_or_else(|| {
+                let (_,_,_,tilt) = part.model.face();
+                vec3(0.0,tilt.sin(),tilt.cos())
+            }, |panel| panel.normal);
             // Leave a margin for the sides of curved displays when viewed nearly edge-on.
-            if toward_camera.dot(vec3(0.0, tilt.sin(), tilt.cos())) < -0.30 { continue; }
+            if toward_camera.dot(normal) < -0.30 { continue; }
             if let Some(pixels) = frame.footprint(part.position + lo, part.position + hi) {
                 targets.push((self.devices[part.device].index, pixels.visible));
             }
@@ -715,7 +723,7 @@ impl Room {
         self.rain_paused = !self.rain_paused;
     }
 
-    pub fn next_frame(&self, animate_rain: bool) -> Option<Instant> {
+    pub fn next_frame(&self, animate_rain: bool, preview_pending: bool) -> Option<Instant> {
         let layout = self.layout.as_ref()?;
         let moving = self.dive.as_ref().is_some_and(|d| self.arrived.is_none() && (d.out || d.progress < 1.0))
             || self.movement.iter().any(|&down| down)
@@ -724,7 +732,8 @@ impl Room {
         if moving {
             return Some(self.animated_at.unwrap_or_else(Instant::now) + FRAME_INTERVAL);
         }
-        let tick = if animate_rain && !self.rain_paused { Duration::from_millis(42) } else { IDLE_TICK };
+        let tick = if preview_pending { Duration::from_millis(28) }
+            else if animate_rain && !self.rain_paused { Duration::from_millis(42) } else { IDLE_TICK };
         self.painted_at.map(|at| at + tick)
     }
 
@@ -1191,14 +1200,14 @@ mod tests {
             room.pointer(Some(p));
             assert_eq!(room.hit(), Some(i), "기기 {i} at {p:?}");
         }
-        assert!(room.next_frame(false).is_some());
+        assert!(room.next_frame(false, false).is_some());
         settle(&mut room);
         let layout = room.layout.as_ref().unwrap();
         assert_eq!(layout.devices[8].highlight, 1.0);
         assert_eq!(layout.anchors(&frame), anchors);
         assert_eq!(layout.dive_view(8), focus_view);
         assert_eq!(room.hit(), Some(8));
-        assert!(room.next_frame(false).is_none());
+        assert!(room.next_frame(false, false).is_none());
         assert!(room.pointer(None));
         assert!(room.hit().is_none());
     }
@@ -1223,7 +1232,7 @@ mod tests {
         assert_eq!(room.take_arrival(), Some(0));
         assert!(room.dive.is_none() && room.take_arrival().is_none());
         room.surface(0);
-        assert!(room.next_frame(false).is_some());
+        assert!(room.next_frame(false, false).is_some());
         settle(&mut room);
         assert!(room.dive.is_none());
     }

@@ -20,7 +20,7 @@ pub struct Geometry {
     pub atlas: Vec<image::RgbaImage>,
     pub center: Vec3,
     pub half: Vec3,
-    pub screen: Option<(Vec3, Vec3)>,
+    pub screen: Option<super::panel::Panel>,
 }
 
 pub struct Asset {
@@ -151,19 +151,20 @@ impl Geometry {
         f.read_exact(bytemuck::cast_slice_mut::<Vertex, u8>(&mut vertices))?;
         let (anchor, half) = model.hull();
         let scale = width_m.map_or(half.x * 2.0, |w| (w as f32 / 0.127).clamp(0.1, half.x * 2.0));
-        let (mut screen_lo, mut screen_hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        // KDM1 originally marked every emissive material as a display. A non-emissive
+        // marked material is the explicit panel; other emitters on that model are trim.
+        let explicit_panel = vertices.iter().any(|v| v.material[3] == 2.0);
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for v in &mut vertices {
             let p = Vec3::from_array(v.point);
             ensure!(p.is_finite() && p.abs().max_element() < 8.0 && Vec3::from_array(v.normal).is_finite()
                 && v.material.iter().chain(&v.uv).all(|n| n.is_finite()), "invalid vertex");
             let mut world = p * scale + vec3(0.0, 0.0, anchor.z);
-            let flags = v.material[3] as u8;
+            let mut flags = v.material[3] as u8;
+            if explicit_panel && flags == 3 { flags = 1; }
             if flags & 2 != 0 {
                 // Some AR files put opaque cover glass above the original luminous panel in this renderer.
                 world.z += (screen_offset_m as f32).clamp(0.0, 0.005) / 0.127;
-                screen_lo = screen_lo.min(world);
-                screen_hi = screen_hi.max(world);
             }
             v.material[3] = VENDOR_MATERIAL + layer as f32 + 32.0 * f32::from(flags & 3);
             v.point = world.to_array();
@@ -179,8 +180,7 @@ impl Geometry {
             let edge = ATLAS_EDGE >> level;
             atlas.push(image::imageops::resize(atlas.last().unwrap(), edge, edge, image::imageops::FilterType::Triangle));
         }
-        let screen = (screen_hi.x > screen_lo.x && screen_hi.y > screen_lo.y).then(||
-            (screen_lo, screen_hi));
+        let screen = super::panel::Panel::measure(&vertices);
         let center = (lo+hi)*0.5;
         let half = (hi-lo)*0.5;
         let mesh = super::lod::IndexedModel::new(&vertices, vertices.len(), center, half);

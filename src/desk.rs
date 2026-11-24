@@ -2,7 +2,7 @@
 //! `kasa_castview` 다. 창마다 렌더러 하나, 연결은 그 창이 열려 있는 동안만 쥔다.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
 use kasa_castview::{key_mods, Click, ScreenView, Style, Surface};
@@ -35,7 +35,7 @@ const TEXTURE: &str = "kasadesk:screen";
 pub enum Ev {
     /// 새 장·상태 — 다시 그린다.
     Wake,
-    Preview(WindowId),
+    PreviewReady,
     Weather(crate::weather::Weather),
     Rgb(WindowId, u64, crate::rgb::Update),
     /// 그 기기를 연다(None 이면 고르기 창).
@@ -72,6 +72,7 @@ struct Win {
     room: Room,
     rgb: crate::rgb::Panel,
     preview: crate::preview::Previews,
+    preview_pending: Arc<AtomicBool>,
     ui: Ui,
 }
 
@@ -242,6 +243,7 @@ impl Desk {
         if let Some(w) = self.windows.values_mut().find(|w| w.label.is_none()) {
             w.label = label;
             w.preview = Default::default();
+            w.preview_pending = Default::default();
             w.rgb = Default::default();
             w.room.suspend();
             w.window.set_min_inner_size(None::<LogicalSize<f64>>);
@@ -274,7 +276,7 @@ impl Desk {
         let mut win = Win {
             gpu, window, label, view: None, display: None, closed_since: None,
             cursor: (0.0, 0.0), occluded: false,
-            room: Room::default(), rgb:Default::default(), preview: Default::default(), ui: Ui::new(),
+            room: Room::default(), rgb:Default::default(), preview: Default::default(), preview_pending: Default::default(), ui: Ui::new(),
         };
         if win.label.is_none() {
             win.room.reflow(win.logical(), &self.machines);
@@ -338,12 +340,13 @@ impl Desk {
             let (login, cred) = (&mut self.login, self.session.get());
             #[cfg(windows)]
             let update = &mut self.update;
+            w.preview_pending.store(false, Ordering::Release);
             let pictures: Vec<_> = w.room.preview_targets().iter().filter_map(|&(i, _)| {
                 Some((i, w.preview.picture(self.machines.get(i)?)?))
             }).collect();
             let index=w.room.rgb_index(&self.machines,self.rgb_config.as_deref());
             let snap=w.rgb.data.clone();
-            w.room.paint(&pictures, index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.fan_index())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, self.weather, |g, ui, size| {
+            let painted = w.room.paint(&pictures, index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.fan_index())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, self.weather, |g, ui, size| {
                 if !w.rgb.open { login.paint_chip(g, ui, size.0, cred.as_ref()); }
                 #[cfg(windows)]
                 if let Some((version, rect)) = update.as_mut().filter(|_|!w.rgb.open) {
@@ -351,7 +354,9 @@ impl Desk {
                 }
                 w.rgb.paint(g,ui,size,index.is_some() && !login.open);
                 login.paint_panel(g, ui, size);
-            })
+            });
+            if painted.is_ok() { self.test.presented_previews(&pictures); }
+            painted
         } else {
             w.gpu.rect(0.0, 0.0, ww, wh, BG);
             let fullscreen = w.fullscreen();
@@ -709,9 +714,7 @@ impl ApplicationHandler<Ev> for Desk {
                 self.weather = weather;
                 self.redraw_pickers();
             }
-            Ev::Preview(id) => {
-                if let Some(w) = self.windows.get(&id).filter(|w| w.label.is_none()) { w.window.request_redraw(); }
-            }
+            Ev::PreviewReady => {} // about_to_wait schedules one room draw for all pending monitors.
             Ev::Wake => {
                 for w in self.windows.values().filter(|w| w.label.is_some()) {
                     w.window.request_redraw();
@@ -917,13 +920,14 @@ impl ApplicationHandler<Ev> for Desk {
             let hidden = (w.occluded || w.window.is_minimized() == Some(true)) && !self.test.captures_previews();
             let visible = if hidden || self.login.open { &[] } else { w.room.preview_targets() };
             let proxy = self.proxy.clone();
+            let pending = w.preview_pending.clone();
             let (changed, retry_at) = w.preview.sync(visible, &self.machines, &self.live, &self.net, move || {
-                let _ = proxy.send_event(Ev::Preview(id));
+                if !pending.swap(true, Ordering::AcqRel) { let _ = proxy.send_event(Ev::PreviewReady); }
             });
             if changed { w.window.request_redraw(); }
             if let Some(at) = retry_at { schedule(&mut next, at); }
             let weather = !w.occluded && !w.rgb.open && !self.login.open && (self.focused == Some(id) || self.test.drives_picker());
-            if let Some(at) = w.room.next_frame(weather) {
+            if let Some(at) = w.room.next_frame(weather, !visible.is_empty() && w.preview_pending.load(Ordering::Acquire)) {
                 if at <= now {
                     w.window.request_redraw();
                 } else {

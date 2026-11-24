@@ -45,8 +45,10 @@ struct Scene {
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 struct PreviewScreen {
-    rect: [f32; 4],
-    size: [f32; 4],
+    horizontal: [f32; 4],
+    vertical: [f32; 4],
+    image: [f32; 4],
+    arc: [f32; 4],
 }
 
 struct Product {
@@ -393,17 +395,26 @@ impl RoomGpu {
         for (index, pic) in previews {
             let Some(slot) = layout.device_of(*index) else { continue };
             let Some(part) = layout.main_part(slot) else { continue };
-            let (lo,hi) = part.screen_box();
-            if part.screen().is_none() {
+            let mut screen = PreviewScreen::default();
+            let aspect = if let Some(panel) = part.screen() {
+                screen.horizontal = panel.horizontal.to_array();
+                screen.vertical = panel.vertical.to_array();
+                screen.arc = [panel.arc[0], panel.arc[1], 0.0, 0.0];
+                panel.size.x / panel.size.y
+            } else {
                 let quad = part.screen_quad();
                 let uv = [[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]];
                 for corner in [0,1,2,0,2,3] {
                     bare.push(mesh::Vertex { point: (part.position + quad[corner]).to_array(), normal: [0.0,0.0,1.0],
                         material: [1.0,1.0,1.0,BARE_SCREEN + slot as f32], uv: uv[corner] });
                 }
-            }
+                let (_, size, _, _) = part.face();
+                size.x / size.y
+            };
             let (w,h) = pic.size;
-            screens[slot] = PreviewScreen { rect: [lo.x,lo.y,hi.x-lo.x,hi.y-lo.y], size: [w as f32,h as f32,0.0,0.0] };
+            let ratio = aspect * h as f32 / w as f32;
+            screen.image = [w as f32, h as f32, ratio.min(1.0), ratio.recip().min(1.0)];
+            screens[slot] = screen;
             if self.preview_serial[slot] != pic.serial {
                 queue.write_texture(wgpu::TexelCopyTextureInfo {
                     texture: &self.preview_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: slot as u32 }, aspect: wgpu::TextureAspect::All,
@@ -446,7 +457,7 @@ impl RoomGpu {
                     }
                     None => 2,
                 };
-                let preview = if part.main && screens[part.device].size[0] > 0.0 { (part.device+1) as f32 } else { 0.0 };
+                let preview = if part.main && screens[part.device].image[0] > 0.0 { (part.device+1) as f32 } else { 0.0 };
                 groups[group].push(Instance { position: part.position.to_array(), highlight: device.highlight, glow: device.glow,
                     rgb:rgb.filter(|(i,_)|*i==device.index && part.model==mesh::Model::Tower).map_or(0.0,|(_,s)|if s.lcd.is_some(){2.0}else{1.0}), preview });
             }

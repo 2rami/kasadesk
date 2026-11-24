@@ -128,7 +128,8 @@ def convert(source, output, yaw, screen_material):
                 layer = mesh.uv_layers.get(uv_name) if uv_name else mesh.uv_layers.active
                 if layer:
                     layer.uv.foreach_get('vector', uv.ravel())
-                data[mask, 9] = float(emission) + 2 * (emission or bool(material and material.name == screen_material))
+                is_panel = bool(material and material.name == screen_material) if screen_material else emission
+                data[mask, 9] = float(emission) + 2 * is_panel
                 data[mask, 6:9] = color
                 origin = np.array([slot % grid, slot // grid]) * tile
                 coords = np.nan_to_num(np.clip(uv[ids[mask]], 0, 1), nan=0.5) if slot else 0.5

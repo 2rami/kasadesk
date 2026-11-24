@@ -1,7 +1,7 @@
 // 재질 번호는 mesh.rs `mat` 과 같다. 빛은 선형 공간에서 셈해 sRGB 로 내보낸다(창 표면은 sRGB 접미가 없는 형식이다).
 
 const BARE_SCREEN = 160.0;
-struct PreviewScreen { rect: vec4f, size: vec4f };
+struct PreviewScreen { horizontal: vec4f, vertical: vec4f, image: vec4f, arc: vec4f };
 
 struct Scene {
     clip_from_world: mat4x4<f32>,
@@ -247,7 +247,6 @@ struct Surface {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) local: vec3<f32>,
     @location(3) @interpolate(flat) material: vec4<f32>,
     @location(4) @interpolate(flat) highlight: f32,
     @location(5) @interpolate(flat) glow: f32,
@@ -272,7 +271,16 @@ fn project(v: Vertex) -> Surface {
         world.x += v.uv.y * v.uv.y * 0.40 * flutter;
         world.z += v.uv.y * (v.uv.x - 0.5) * 0.21 * flutter;
     }
-    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.point, v.material, v.highlight, v.glow, v.uv, v.preview, v.rgb);
+    var uv = v.uv;
+    if v.material.w >= 96.0 && v.material.w < BARE_SCREEN && v.preview > 0.5 {
+        let panel = scene.screens[u32(v.preview) - 1u];
+        let p = vec4f(v.point, 1.0);
+        uv = vec2f(dot(panel.horizontal, p), dot(panel.vertical, p));
+        if panel.arc.x > 0.0 {
+            uv.x = 0.5 + asin(clamp((2.0*uv.x - 1.0)*panel.arc.x, -1.0, 1.0))*panel.arc.y;
+        }
+    }
+    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.material, v.highlight, v.glow, uv, v.preview, v.rgb);
 }
 
 fn lin(c: vec3<f32>) -> vec3<f32> {
@@ -324,12 +332,10 @@ fn preview_tap(pixel: vec2f, size: vec2f, layer: u32) -> vec3f {
 }
 
 fn preview_color(layer: u32, xy: vec2f, dx: vec2f, dy: vec2f) -> vec4f {
-    let rect = scene.screens[layer].rect;
-    let size = scene.screens[layer].size.xy;
-    let ratio = (rect.z / rect.w) * (size.y / size.x);
-    let stretch = max(vec2f(ratio, 1.0/ratio), vec2f(1.0));
+    let image = scene.screens[layer].image;
+    let size = image.xy;
+    let stretch = image.zw;
     let uv = (vec2f(xy.x, 1.0-xy.y) - 0.5) * stretch + 0.5;
-    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) { return vec4f(0.012,0.014,0.018,1.0); }
     let pixel = uv * (size - 1.0) + 0.5;
     let scale = stretch * (size - 1.0) * vec2f(1.0,-1.0);
     let x = dx * scale;
@@ -350,15 +356,15 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
     let n = normalize(s.normal + vec3<f32>(0.0, 1e-5, 0.0));
     let uv_dx = dpdx(s.uv);
     let uv_dy = dpdy(s.uv);
-    let local_dx = dpdx(s.local.xy);
-    let local_dy = dpdy(s.local.xy);
     if mode >= BARE_SCREEN { return preview_color(u32(mode - BARE_SCREEN), s.uv, uv_dx, uv_dy); }
     if mode >= 32.0 {
         if mode >= 96.0 && s.preview > 0.5 {
             let layer = u32(s.preview) - 1u;
-            let rect = scene.screens[layer].rect;
-            let xy = (s.local.xy - rect.xy) / rect.zw;
-            return preview_color(layer, xy, local_dx/rect.zw, local_dy/rect.zw);
+            let image = preview_color(layer, s.uv, uv_dx, uv_dy);
+            let eye = normalize(scene.camera.xyz - s.world);
+            let rim = pow(1.0 - clamp(dot(n, eye), 0.0, 1.0), 4.0);
+            let sky = mix(vec3f(0.21,0.29,0.40), vec3f(0.74,0.83,0.90), smoothstep(-0.1,0.8,reflect(-eye,n).y));
+            return vec4f(mix(image.rgb, sky, 0.006 + rim*0.035), 1.0);
         }
         let tex = textureSampleGrad(products, linear_sampler, s.uv, i32(mode - 32.0) % 32, uv_dx, uv_dy).rgb;
         if (i32(mode - 32.0) / 32) % 2 == 1 { return vec4<f32>(s.material.rgb * tex * (0.65 + 0.35 * s.glow), 1.0); }

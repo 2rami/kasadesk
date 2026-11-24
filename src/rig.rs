@@ -260,6 +260,13 @@ impl Rig {
         }
     }
 
+    pub fn presented_previews(&self, pictures: &[(usize, std::sync::Arc<crate::preview::Picture>)]) {
+        if self.log.is_some() && self.captures_previews() {
+            let previews: Vec<_> = pictures.iter().map(|(index, p)| (*index, p.serial)).collect();
+            self.write(json!({"t": self.started.elapsed().as_secs_f64(), "previews": previews}));
+        }
+    }
+
     fn write(&self, line: serde_json::Value) {
         let Some(path) = &self.log else { return };
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
