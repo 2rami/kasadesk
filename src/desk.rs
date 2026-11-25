@@ -1,8 +1,8 @@
 //! 창들 — 창 하나에 기기 하나를 본다. 기기를 아직 안 골랐으면 고르기 화면이다. 보기·조작·HUD 는 본 앱 화면 탭과 같은
 //! `kasa_castview` 다. 창마다 렌더러 하나, 연결은 그 창이 열려 있는 동안만 쥔다.
 
-mod bottom_edge;
-use bottom_edge::BottomEdge;
+mod vertical_edges;
+use vertical_edges::VerticalEdges;
 
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -72,7 +72,7 @@ struct Win {
     display: Option<u32>,
     closed_since: Option<Instant>,
     cursor: (f32, f32),
-    bottom_edge: BottomEdge,
+    vertical_edges: VerticalEdges,
     occluded: bool,
     room: Room,
     rgb: crate::rgb::Panel,
@@ -80,6 +80,13 @@ struct Win {
     preview: crate::preview::Previews,
     preview_pending: Arc<AtomicBool>,
     ui: Ui,
+}
+
+fn toolbar_column(view: &ScreenView, layout: &kasa_castview::Layout, x: f64) -> bool {
+    view.extra.iter().copied()
+        .chain([Some(layout.toggle), layout.key_button, layout.zoom_chip, layout.display_chip, view.audio.pill]
+            .into_iter().flatten())
+        .any(|(left, top, width, _)| top < layout.image.1 && x >= f64::from(left) && x < f64::from(left + width))
 }
 
 impl Win {
@@ -291,7 +298,7 @@ impl Desk {
         };
         let mut win = Win {
             gpu, window, label, view: None, display: None, closed_since: None,
-            cursor: (0.0, 0.0), bottom_edge: BottomEdge::default(), occluded: false,
+            cursor: (0.0, 0.0), vertical_edges: VerticalEdges::default(), occluded: false,
             room: Room::default(), rgb:Default::default(), rgb_machine:None, preview: Default::default(), preview_pending: Default::default(), ui: Ui::new(),
         };
         if win.label.is_none() {
@@ -321,7 +328,7 @@ impl Desk {
                 }
                 None => None,
             };
-            w.bottom_edge.clear();
+            w.vertical_edges.clear();
             w.view = None;
             w.gpu.drop_image(TEXTURE);
             let proxy = self.proxy.clone();
@@ -404,7 +411,7 @@ impl Desk {
     }
 
     fn back_to_picker(w: &mut Win, machines: &[Machine]) {
-        w.bottom_edge.clear();
+        w.vertical_edges.clear();
         w.view = None;
         let label = w.label.take();
         w.display = None;
@@ -554,7 +561,7 @@ impl Desk {
                         Click::Ignored => false,
                         Click::Handled | Click::Pressed => true,
                         Click::Display(next) => {
-                            w.bottom_edge.clear();
+                            w.vertical_edges.clear();
                             w.display = Some(next);
                             w.view = None;
                             true
@@ -689,21 +696,31 @@ impl Desk {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = f64::from(w.gpu.scale.max(0.5));
                 let p = (position.x / scale, position.y / scale);
+                let previous_y = w.cursor.1;
                 w.cursor = (p.0 as f32, p.1 as f32);
                 if let Some(view) = w.view.as_mut() {
                     let active = self.focused == Some(id) && !w.occluded && view.control
                         && view.key_menu.is_none() && !view.closed() && view.input_note().is_none();
-                    if let Some(hit) = w.bottom_edge.motion(view.layout.filter(|_| active), p, scale) {
-                        // Clicks and scrolling still go through the normal in-image hit test.
-                        if !hit.crossed || w.window.set_cursor_position(PhysicalPosition::new(position.x, hit.local_row)).is_ok() {
-                            w.cursor.1 = hit.image_row;
+                    if let Some(layout) = view.layout.filter(|_| active) {
+                        if let Some(hit) = w.vertical_edges.motion(layout, p, scale) {
+                            // A further push from the first row can reach a local toolbar button.
+                            // A drag still belongs to the remote machine until its button is released.
+                            if hit.crossed && previous_y == layout.image.1 && p.1 < f64::from(layout.image.1) && view.buttons == 0
+                                && toolbar_column(view, &layout, p.0)
+                            {
+                                w.vertical_edges.clear();
+                            } else if !hit.crossed || w.window.set_cursor_position(PhysicalPosition::new(position.x, hit.local_row)).is_ok() {
+                                w.cursor.1 = hit.image_row;
+                            }
+                            view.pointer((p.0, hit.remote_y), view.buttons, view.remote_mods(key_mods(self.modifiers)));
+                            return;
                         }
-                        view.pointer((p.0, hit.remote_y), view.buttons, view.remote_mods(key_mods(self.modifiers)));
-                        return;
+                    } else {
+                        w.vertical_edges.clear();
                     }
                 }
             }
-            WindowEvent::CursorLeft { .. } => w.bottom_edge.clear(),
+            WindowEvent::CursorLeft { .. } => w.vertical_edges.clear(),
             _ => {}
         }
         self.mouse(id, event);
@@ -875,7 +892,7 @@ impl ApplicationHandler<Ev> for Desk {
             WindowEvent::RedrawRequested => self.paint(id),
             WindowEvent::Resized(size) => {
                 if let Some(w) = self.windows.get_mut(&id) {
-                    w.bottom_edge.clear();
+                    w.vertical_edges.clear();
                     w.gpu.resize(size.width, size.height);
                     if w.label.is_none() {
                         w.room.reflow(w.logical(), &self.machines);
@@ -895,7 +912,7 @@ impl ApplicationHandler<Ev> for Desk {
                     }
                     w.gpu.set_font_size(FONT_SIZE);
                     let size = w.window.inner_size();
-                    w.bottom_edge.clear();
+                    w.vertical_edges.clear();
                     w.gpu.resize(size.width, size.height);
                     if w.label.is_none() {
                         w.room.reflow(w.logical(), &self.machines);
@@ -906,7 +923,7 @@ impl ApplicationHandler<Ev> for Desk {
             }
             WindowEvent::Occluded(hidden) => {
                 if let Some(w) = self.windows.get_mut(&id) {
-                    w.bottom_edge.clear();
+                    w.vertical_edges.clear();
                     w.occluded = *hidden;
                     if !hidden { w.window.request_redraw(); }
                 }
@@ -915,11 +932,11 @@ impl ApplicationHandler<Ev> for Desk {
                 // 창을 오가는 사이 조합키(⌘Tab 의 ⌘)를 뗀 것은 이 창에 안 온다 — 들고 있던 값을 버린다. 안 버리면 돌아와 누르는
                 // 클릭·글자가 그 기기에 Alt 등이 눌린 채로 가서 조작이 먹통처럼 보인다.
                 self.modifiers = ModifiersState::empty();
+                if let Some(w) = self.windows.get_mut(&id) { w.vertical_edges.clear(); }
                 if *f {
                     self.focused = Some(id);
                 } else if self.focused == Some(id) {
                     if let Some(w) = self.windows.get_mut(&id) {
-                        w.bottom_edge.clear();
                         w.room.stop_navigation();
                         if let Some(view) = w.view.as_mut() {
                             view.focus_lost();
