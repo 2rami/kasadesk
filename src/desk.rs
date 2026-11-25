@@ -2,13 +2,16 @@
 //! `kasa_castview` 다. 창마다 렌더러 하나, 연결은 그 창이 열려 있는 동안만 쥔다.
 
 mod vertical_edges;
+mod remote;
+mod input_feedback;
+use input_feedback::{InputFeedback, key_label};
 use vertical_edges::VerticalEdges;
 
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
-use kasa_castview::{key_mods, Click, ScreenView, Style, Surface};
+use kasa_castview::{key_mods, Click, ScreenView, Surface};
 use kasa_gridview::{GridFonts, GridRenderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -23,16 +26,13 @@ use crate::net::Net;
 use crate::rig::PickerAction;
 use crate::roster::Machine;
 use crate::scene::Room;
-use crate::text::{Pen, Ui};
+use crate::text::Ui;
 
 /// 보는 창의 연결이 닫히면 이만큼 뒤 다시 붙는다 — 그 기기 재시작·직통이 늦게 서는 경우. 본 앱 화면 탭과 같은 값.
 const RETRY_AFTER: Duration = Duration::from_secs(3);
 const FONT_SIZE: f32 = 13.0;
 const PICKER_MIN: LogicalSize<f64> = LogicalSize::new(360.0, 300.0);
 const BG: [u8; 4] = [24, 24, 27, 255];
-const MUTE: [u8; 4] = [150, 150, 160, 255];
-const ACCENT: [u8; 4] = [86, 132, 245, 255];
-const EDGE: [u8; 4] = [255, 255, 255, 40];
 const TEXTURE: &str = "kasadesk:screen";
 
 pub enum Ev {
@@ -73,6 +73,7 @@ struct Win {
     closed_since: Option<Instant>,
     cursor: (f32, f32),
     vertical_edges: VerticalEdges,
+    input_feedback: InputFeedback,
     occluded: bool,
     room: Room,
     rgb: crate::rgb::Panel,
@@ -298,7 +299,7 @@ impl Desk {
         };
         let mut win = Win {
             gpu, window, label, view: None, display: None, closed_since: None,
-            cursor: (0.0, 0.0), vertical_edges: VerticalEdges::default(), occluded: false,
+            cursor: (0.0, 0.0), vertical_edges: VerticalEdges::default(), input_feedback: InputFeedback::default(), occluded: false,
             room: Room::default(), rgb:Default::default(), rgb_machine:None, preview: Default::default(), preview_pending: Default::default(), ui: Ui::new(),
         };
         if win.label.is_none() {
@@ -329,6 +330,7 @@ impl Desk {
                 None => None,
             };
             w.vertical_edges.clear();
+            w.input_feedback.clear();
             w.view = None;
             w.gpu.drop_image(TEXTURE);
             let proxy = self.proxy.clone();
@@ -394,11 +396,9 @@ impl Desk {
             w.gpu.rect(0.0, 0.0, ww, wh, BG);
             let fullscreen = w.fullscreen();
             if let Some(view) = w.view.as_mut() {
-                let extra = ["기기", if fullscreen { "창으로" } else { "전체 화면" }];
-                let style = Style { accent: ACCENT, mute: MUTE, edge: EDGE, extra: &extra };
-                let mut pen = Pen { g: &mut w.gpu, ui: &mut w.ui };
-                kasa_castview::paint(&mut pen, view, TEXTURE, (0.0, 0.0, ww, wh), Surface::Window(id), w.cursor, &style);
+                remote::paint(&mut w.gpu, &mut w.ui, view, TEXTURE, (0.0,0.0,ww,wh), Surface::Window(id), w.cursor, fullscreen, w.input_feedback.enabled);
             }
+            w.input_feedback.paint(&mut w.gpu, &mut w.ui, wh);
             w.gpu.render(0.0, true, |_, _, _, _, _, _| {})
         };
         if let Err(e) = result {
@@ -411,6 +411,7 @@ impl Desk {
     }
 
     fn back_to_picker(w: &mut Win, machines: &[Machine]) {
+        w.input_feedback.clear();
         w.vertical_edges.clear();
         w.view = None;
         let label = w.label.take();
@@ -554,12 +555,23 @@ impl Desk {
                     _ => return,
                 };
                 let pressed = *state == ElementState::Pressed;
+                let can_report = !view.closed() && view.control && view.input_note().is_none();
+                let special = view.key_row_at(p).map(|i| view.special_keys()[i].0);
                 if view.menu_click(p, bit, pressed) {
+                    if can_report && pressed && bit == 1 {
+                        if let Some(label) = special { w.input_feedback.show(label); }
+                    }
                     true
                 } else {
                     match view.click(p, bit, pressed, mods) {
                         Click::Ignored => false,
-                        Click::Handled | Click::Pressed => true,
+                        Click::Handled | Click::Pressed => {
+                            if can_report && pressed && view.buttons & bit != 0 {
+                                w.input_feedback.click(w.cursor, match bit { 1 => "왼쪽 클릭", 2 => "우클릭", _ => "가운데 클릭" });
+                            }
+                            if !view.control { w.input_feedback.clear(); }
+                            true
+                        }
                         Click::Display(next) => {
                             w.vertical_edges.clear();
                             w.display = Some(next);
@@ -570,6 +582,11 @@ impl Desk {
                             Self::back_to_picker(w, &self.machines);
                             true
                         }
+                        Click::Extra(2) => {
+                            w.input_feedback.enabled = !w.input_feedback.enabled;
+                            w.input_feedback.clear();
+                            true
+                        }
                         Click::Extra(_) => {
                             w.toggle_fullscreen();
                             true
@@ -577,8 +594,18 @@ impl Desk {
                     }
                 }
             }
-            WindowEvent::CursorMoved { .. } => view.hover(p, mods) && view.key_menu.is_some(),
-            WindowEvent::MouseWheel { delta, .. } => view.wheel(p, delta, modifiers),
+            WindowEvent::CursorMoved { .. } => {
+                let used = view.hover(p, mods);
+                used && (view.key_menu.is_some() || w.input_feedback.drag(w.cursor,view.buttons))
+            },
+            WindowEvent::MouseWheel { delta, .. } => {
+                let zoom = kasa_castview::zoom_chord(modifiers);
+                let handled = view.wheel(p, delta, modifiers);
+                if handled && view.control && !view.closed() && view.input_note().is_none() {
+                    w.input_feedback.show(if zoom { "확대 · 축소" } else { "스크롤" });
+                }
+                handled
+            }
             WindowEvent::PinchGesture { delta, .. } => view.pinch(p, *delta),
             _ => false,
         };
@@ -660,11 +687,22 @@ impl Desk {
             if !event.repeat && view.control {
                 if let Some(text) = arboard::Clipboard::new().ok().and_then(|mut c| c.get_text().ok()) {
                     view.commit(&text);
+                    if !text.is_empty() && !view.closed() && view.input_note().is_none() {
+                        w.input_feedback.show(format!("붙여넣기 · {}자", text.chars().count()));
+                        w.window.request_redraw();
+                    }
                 }
             }
             return;
         }
-        if view.key_event(&mut self.hangul, event, m) {
+        let report = pressed && view.control && !view.closed() && view.input_note().is_none() && view.key_menu.is_none();
+        let repaint = view.key_event(&mut self.hangul, event, m);
+        let label = if report && w.input_feedback.enabled {
+            code.and_then(|key| key_label(key, view.remote_mods(key_mods(m)), view.remote_windows()))
+        } else { None };
+        let changed = label.is_some();
+        if let Some(label) = label { w.input_feedback.show(label); }
+        if repaint || changed {
             w.window.request_redraw();
         }
     }
@@ -938,6 +976,7 @@ impl ApplicationHandler<Ev> for Desk {
                 } else if self.focused == Some(id) {
                     if let Some(w) = self.windows.get_mut(&id) {
                         w.room.stop_navigation();
+                        w.input_feedback.clear();
                         if let Some(view) = w.view.as_mut() {
                             view.focus_lost();
                         }
@@ -951,7 +990,7 @@ impl ApplicationHandler<Ev> for Desk {
                 self.key(event_loop, id, &event);
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                match self.windows.get(&id) {
+                match self.windows.get_mut(&id) {
                     Some(w) if w.label.is_none() => {
                         if self.login.commit(text) {
                             w.window.request_redraw();
@@ -960,6 +999,10 @@ impl ApplicationHandler<Ev> for Desk {
                     Some(w) => {
                         if let Some(view) = w.view.as_ref() {
                             view.commit(text);
+                            if view.control && !view.closed() && view.input_note().is_none() && !text.is_empty() {
+                                w.input_feedback.show(format!("문자 입력 · {}자", text.chars().count()));
+                                w.window.request_redraw();
+                            }
                         }
                     }
                     None => {}
@@ -993,6 +1036,11 @@ impl ApplicationHandler<Ev> for Desk {
         }
         let now = Instant::now();
         let mut next = self.test.next_wake(now);
+        for w in self.windows.values_mut().filter(|w| w.label.is_some()) {
+            let (expired, deadline) = w.input_feedback.tick(now);
+            if expired { w.window.request_redraw(); }
+            if let Some(at) = deadline { schedule(&mut next, at); }
+        }
         if self.windows.values().any(|w| w.label.is_some()) {
             schedule(&mut next, now + Duration::from_millis(500));
         }

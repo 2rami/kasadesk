@@ -1,0 +1,13 @@
+name: kasadesk_protocol
+description: KasaTerm account and screen client from the pinned submodule.
+publish_to: none
+environment:
+  sdk: ^3.11.5
+dependencies:
+  flutter:
+    sdk: flutter
+  crypto: ^3.0.6
+  ffi: ^2.1.3
+  http: ^1.2.2
+  url_launcher: ^6.3.2
+  web_socket_channel: ^3.0.1

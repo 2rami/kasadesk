@@ -101,24 +101,6 @@ impl Ui {
     }
 }
 
-/// 보기 HUD(`kasa_castview::paint`)가 이 고딕으로 그리게 거는 판.
-pub struct Pen<'a> {
-    pub g: &'a mut GridRenderer,
-    pub ui: &'a mut Ui,
-}
-
-impl kasa_castview::Canvas for Pen<'_> {
-    fn grid(&mut self) -> &mut GridRenderer {
-        self.g
-    }
-    fn measure(&mut self, text: &str, size: f32) -> f32 {
-        self.ui.measure(self.g, text, size, false)
-    }
-    fn text(&mut self, x: f32, y: f32, text: &str, size: f32, color: [u8; 4]) {
-        self.ui.draw(self.g, x, y, text, size, color, false);
-    }
-}
-
 pub fn fit<'a>(g: &mut GridRenderer, ui: &mut Ui, text: &'a str, size: f32, bold: bool, max: f32) -> std::borrow::Cow<'a, str> {
     if ui.measure(g, text, size, bold) <= max {
         return text.into();
