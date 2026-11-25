@@ -4,11 +4,11 @@
     <title>KasaDesk</title>
     <link>https://2rami.github.io/kasadesk/appcast-win.xml</link>
     <item>
-      <title>0.1.13</title>
-      <pubDate>Wed, 25 Nov 2026 05:13:34 GMT</pubDate>
-      <sparkle:version>0.1.13</sparkle:version>
-      <sparkle:shortVersionString>0.1.13</sparkle:shortVersionString>
-      <enclosure url="https://github.com/2rami/kasadesk/releases/download/v0.1.13/KasaDesk-0.1.13-windows-x86_64.msi" sparkle:os="windows" sparkle:edSignature="PcCxJtL+Sgg42/HOF1tZtxvOV2o+siUx4U7HcJ16+PEsPT1yhiKC0SX3J0JUuTUp/YNOHW51xnKen4IDA5AeAQ==" length="15863808" type="application/octet-stream"/>
+      <title>0.1.14</title>
+      <pubDate>Wed, 25 Nov 2026 06:47:24 GMT</pubDate>
+      <sparkle:version>0.1.14</sparkle:version>
+      <sparkle:shortVersionString>0.1.14</sparkle:shortVersionString>
+      <enclosure url="https://github.com/2rami/kasadesk/releases/download/v0.1.14/KasaDesk-0.1.14-windows-x86_64.msi" sparkle:os="windows" sparkle:edSignature="9i1B3cQva02ILvtbCsniY+49W9mIiOL4No4HmxHz8k5ma32U6B4ajFWIMAEnJ/0m+gwBzWvX4yDu4ELJUjAvBQ==" length="15859712" type="application/octet-stream"/>
     </item>
   </channel>
 </rss>
