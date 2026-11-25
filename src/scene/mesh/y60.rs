@@ -157,14 +157,25 @@ fn panels(m: &mut Mesh) {
 
 const CASE_YAW: f32 = -0.68;
 
-pub(in crate::scene) fn fan_center(index: usize) -> Vec3 {
-    Quat::from_rotation_y(CASE_YAW) * components::FANS[index].0 / 127.0
+use crate::rgb::LightPart;
+
+const GPU_CENTER: Vec3 = Vec3::new(-85.8, 129.0, 62.0);
+const GPU_HALF: Vec3 = Vec3::new(123.5, 62.25, 20.0);
+
+pub(in crate::scene) fn part_center(part: LightPart) -> Vec3 {
+    let at = match part {
+        LightPart::Fan(i) => components::FANS[i].0,
+        LightPart::Gpu => GPU_CENTER + Vec3::Z * GPU_HALF.z,
+    };
+    Quat::from_rotation_y(CASE_YAW) * at / 127.0
 }
 
-pub(in crate::scene) fn fan_hit(origin: Vec3, direction: Vec3) -> Option<usize> {
+pub(in crate::scene) fn light_hit(origin: Vec3, direction: Vec3) -> Option<LightPart> {
     let inverse = Quat::from_rotation_y(-CASE_YAW);
     let origin = (inverse * origin) * 127.0;
     let dir = inverse * direction;
+    let ray = crate::scene::Ray { origin, direction: dir };
+    let card = ray.hit_box(GPU_CENTER - GPU_HALF, GPU_CENTER + GPU_HALF).map(|t| (LightPart::Gpu, t));
     components::FANS
         .iter()
         .enumerate()
@@ -174,8 +185,9 @@ pub(in crate::scene) fn fan_hit(origin: Vec3, direction: Vec3) -> Option<usize> 
                 return None;
             }
             let t = (center - origin).dot(normal) / dot;
-            (t >= 0.0 && (origin + t * dir - center).length_squared() <= 58.0 * 58.0).then_some((i, t))
+            (t >= 0.0 && (origin + t * dir - center).length_squared() <= 58.0 * 58.0).then_some((LightPart::Fan(i), t))
         })
+        .chain(card)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
 }
@@ -222,9 +234,12 @@ mod rgb_tests {
     #[test]
     fn all_six_mounted_fans_can_be_picked_from_their_faces() {
         let turn = Quat::from_rotation_y(CASE_YAW);
+        let front = turn * Vec3::Z;
+        assert_eq!(light_hit(part_center(LightPart::Gpu) + front * 0.5, -front), Some(LightPart::Gpu));
         for (index, (_, normal)) in components::FANS.iter().enumerate() {
             let n = turn * *normal;
-            assert_eq!(fan_hit(fan_center(index) + n * 0.12, -n), Some(index));
+            let fan = LightPart::Fan(index);
+            assert_eq!(light_hit(part_center(fan) + n * 0.12, -n), Some(fan));
         }
     }
 }

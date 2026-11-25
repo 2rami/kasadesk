@@ -21,6 +21,7 @@ mod mat {
     pub const FABRIC: f32 = 14.0;
     pub const GLASS: f32 = 15.0;
     pub const RGB: f32 = 16.0;
+    pub const GPU_STRIP: f32 = 30.0;
     pub const DIFFUSER: f32 = 31.0;
 }
 

@@ -645,7 +645,7 @@ impl Room {
             .or_else(|| towers.into_iter().next())
     }
 
-    pub fn fan_hit(&self, index: usize, p: Point) -> Option<usize> {
+    pub fn light_hit(&self, index: usize, p: Point) -> Option<crate::rgb::LightPart> {
         let layout = self.layout.as_ref()?;
         let part = layout.parts.iter().find(|p| p.model == Model::Tower && layout.devices[p.device].index == index)?;
         let frame = self.home_frame()?;
@@ -653,7 +653,7 @@ impl Room {
             return None;
         }
         let ray = frame.ray(p)?;
-        mesh::y60::fan_hit(ray.origin - part.position, ray.direction)
+        mesh::y60::light_hit(ray.origin - part.position, ray.direction)
     }
 
     pub fn rgb_view(&mut self, index: Option<usize>) {
@@ -788,7 +788,8 @@ impl Room {
         &mut self,
         previews: &[(usize, std::sync::Arc<crate::preview::Picture>)],
         rgb: Option<(usize, &crate::rgb::Snapshot)>,
-        editing: Option<(usize, usize)>,
+        editing: Option<(usize, crate::rgb::LightPart)>,
+        gpu_color: Option<(usize, crate::rgb::Color)>,
         g: &mut GridRenderer,
         ui: &mut Ui,
         machines: &[Machine],
@@ -875,8 +876,8 @@ impl Room {
         if let Some((index, fan)) = editing {
             if let Some(tower) = layout.parts.iter().find(|p| p.model == Model::Tower && layout.devices[p.device].index == index)
             {
-                if let Some(at) = home.visible(tower.position + mesh::y60::fan_center(fan)) {
-                    let label = crate::rgb::NAMES[fan];
+                if let Some(at) = home.visible(tower.position + mesh::y60::part_center(fan)) {
+                    let label = fan.name();
                     let width = ui.measure(g, label, 11.0, true) + 18.0;
                     g.round_rect_stroke(at.x - 7.0, at.y - 7.0, 14.0, 14.0, 7.0, 1.5, [254, 211, 150, 245]);
                     g.rect(at.x + 7.0, at.y - 0.75, 10.0, 1.5, [254, 211, 150, 245]);
@@ -954,7 +955,7 @@ impl Room {
         let gpu = &mut self.gpu;
         let result = g.render_with_underlay(0.0, true, |device, queue, encoder, texture, target, format| {
             gpu.get_or_insert_with(|| gpu::RoomGpu::new(device, queue, format))
-                .draw(device, queue, encoder, texture, target, layout, &frame, previews, rgb);
+                .draw(device, queue, encoder, texture, target, layout, &frame, previews, rgb, gpu_color);
         });
         self.tags = tags;
         if self.keyboard.is_none() && self.dive.is_none() && self.dragging.is_none() {

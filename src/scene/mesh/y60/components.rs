@@ -393,7 +393,7 @@ pub(super) fn neptune(m: &mut Mesh) {
                 Vec3::Z,
                 1.65,
                 gradient([67, 215, 226], [188, 138, 238], i as f32 / 35.0),
-                mat::RGB,
+                mat::GPU_STRIP,
             );
         }
     }

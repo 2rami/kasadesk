@@ -20,6 +20,50 @@ pub const SPOTS: [&str; 6] = ["top1", "top2", "top3", "left1", "right1", "right2
 pub const NAMES: [&str; 6] = ["상단 1", "상단 2", "상단 3", "후면", "측면 상단", "측면 하단"];
 pub type Color = [u8; 3];
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LightPart {
+    Fan(usize),
+    Gpu,
+}
+
+impl LightPart {
+    pub fn name(self) -> &'static str {
+        match self { Self::Fan(i) => NAMES[i], Self::Gpu => "NEPTUNE" }
+    }
+
+    fn spot(self) -> Option<&'static str> {
+        match self { Self::Fan(i) => SPOTS.get(i).copied(), Self::Gpu => Some("gpu") }
+    }
+}
+
+#[derive(Clone)]
+pub struct GpuLight {
+    pub controller: bool,
+    pub sync: bool,
+    pub asleep: bool,
+    pub fixed: Option<Color>,
+    pub effect: String,
+    pub sample: Option<Color>,
+    pub utilization: Option<u64>,
+}
+
+impl GpuLight {
+    fn parse(v: &Value) -> Option<Self> {
+        Some(Self {
+            controller: v["controller"].as_bool()?,
+            sync: v["sync"].as_bool()?,
+            asleep: v["asleep"].as_bool()?,
+            fixed: match v.get("fixed")? {
+                Value::Null => None,
+                value => Some(parse_color(value.as_str()?)?),
+            },
+            sample: v["sample"].as_str().and_then(parse_color),
+            effect: v["effect"].as_str().unwrap_or("").chars().take(20).collect(),
+            utilization: v["utilization"].as_u64().filter(|v| *v <= 100),
+        })
+    }
+}
+
 #[derive(PartialEq)]
 pub struct Config {
     device: String,
@@ -95,6 +139,7 @@ pub struct Snapshot {
     pub liquid: Option<f64>,
     pub pump: Option<u32>,
     pub gpu: Option<f64>,
+    pub gpu_light: Option<GpuLight>,
     pub lcd: Option<image::RgbaImage>,
 }
 
@@ -143,6 +188,7 @@ impl Snapshot {
             liquid: v["liquid"].as_f64(),
             pump: v["pump"].as_u64().and_then(|n| n.try_into().ok()),
             gpu: v["gpu"].as_f64(),
+            gpu_light: GpuLight::parse(&v["gpu_light"]),
             lcd,
         })
     }
@@ -265,7 +311,7 @@ pub struct Update {
     pub applied: bool,
 }
 pub struct Session {
-    tx: mpsc::Sender<(usize, Option<Color>)>,
+    tx: mpsc::Sender<(&'static str, Option<Color>)>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Session {
@@ -275,7 +321,7 @@ impl Drop for Session {
 }
 impl Session {
     pub fn start(rt: &tokio::runtime::Handle, target: Target, notify: impl Fn(Update) + Send + Sync + 'static) -> Self {
-        let (tx, mut rx) = mpsc::channel::<(usize, Option<Color>)>(1);
+        let (tx, mut rx) = mpsc::channel::<(&'static str, Option<Color>)>(1);
         let task = rt.spawn(async move {
             let run = async {
                 let mut channel = Channel::open(target)?;
@@ -286,7 +332,8 @@ impl Session {
                     applied = false;
                     match timeout(Duration::from_millis(1600), rx.recv()).await {
                         Ok(Some((spot, color))) => {
-                            channel.request(json!({"op":"color","spot":SPOTS[spot],"color":color.map(hex)})).await?;
+                            let reply = channel.request(json!({"op":"color","spot":spot,"color":color.map(hex)})).await?;
+                            ensure!(reply["applied"] == true, "호스트가 색 저장을 확인하지 못했어요");
                             applied = true;
                         }
                         Ok(None) => return Ok::<_, anyhow::Error>(()),
@@ -301,8 +348,8 @@ impl Session {
         });
         Self { tx, task }
     }
-    pub fn color(&self, spot: usize, color: Option<Color>) -> bool {
-        spot < 6 && self.tx.try_send((spot, color)).is_ok()
+    pub fn color(&self, part: LightPart, color: Option<Color>) -> bool {
+        part.spot().is_some_and(|spot| self.tx.try_send((spot, color)).is_ok())
     }
 }
 

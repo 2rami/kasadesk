@@ -25,7 +25,7 @@ impl IndexedModel {
         let stride = std::mem::size_of::<Vertex>();
         let adapter = meshopt::VertexDataAdapter::new(bytemuck::cast_slice(&vertices), stride, 0).unwrap();
         let attributes = &bytemuck::cast_slice::<_, f32>(&vertices)[3..];
-        let locked: Vec<_> = vertices.iter().map(|v| matches!(v.material[3] as u32, 17..=29 | 96..)).collect();
+        let locked: Vec<_> = vertices.iter().map(|v| matches!(v.material[3] as u32, 17..=30 | 96..)).collect();
         let reduced = meshopt::simplify_with_attributes_and_locks(
             body,
             &adapter,

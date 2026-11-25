@@ -10,7 +10,7 @@ use std::ops::Range;
 use super::{Frame, Layout};
 
 const VERTEX_ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 6 => Float32x2];
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32, 5 => Float32, 7 => Float32, 8 => Float32];
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32, 5 => Float32, 7 => Float32, 8 => Float32, 9 => Float32x4];
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 // Four vendor flag combinations occupy material IDs 32 through 159.
 const BARE_SCREEN: f32 = 160.0;
@@ -23,6 +23,7 @@ struct Instance {
     glow: f32,
     preview: f32,
     rgb: f32,
+    gpu_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -350,6 +351,7 @@ impl RoomGpu {
         frame: &Frame,
         previews: &[(usize, std::sync::Arc<crate::preview::Picture>)],
         rgb: Option<(usize, &crate::rgb::Snapshot)>,
+        gpu_color: Option<(usize, crate::rgb::Color)>,
     ) {
         let size = texture.size();
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
@@ -438,7 +440,7 @@ impl RoomGpu {
             windows: [room_lo.x, room_hi.x, room_hi.y, layout.plan.side_window_end()],
         }));
         // 방 한 칸 + 모형 종류마다 줄 세운 기기 자리.
-        let mut data = vec![Instance { position: [0.0; 3], highlight: 0.0, glow: 0.0, preview: 0.0, rgb: 0.0 }];
+        let mut data = vec![Instance { position: [0.0; 3], highlight: 0.0, glow: 0.0, preview: 0.0, rgb: 0.0, gpu_color: [0.0; 4] }];
         self.far_detail.resize(layout.parts.len(), false);
         let mut batches = Vec::with_capacity(self.products.len());
         for index in 0..self.products.len() {
@@ -459,6 +461,8 @@ impl RoomGpu {
                 };
                 let preview = if part.main && screens[part.device].image[0] > 0.0 { (part.device+1) as f32 } else { 0.0 };
                 groups[group].push(Instance { position: part.position.to_array(), highlight: device.highlight, glow: device.glow,
+                    gpu_color: gpu_color.filter(|(i, _)| *i == device.index && part.model == mesh::Model::Tower)
+                        .map_or([0.0; 4], |(_, [r,g,b])| [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]),
                     rgb:rgb.filter(|(i,_)|*i==device.index && part.model==mesh::Model::Tower).map_or(0.0,|(_,s)|if s.lcd.is_some(){2.0}else{1.0}), preview });
             }
             let middle = start + groups[0].len() as u32;

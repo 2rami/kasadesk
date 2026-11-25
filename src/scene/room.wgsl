@@ -241,6 +241,7 @@ struct Vertex {
     @location(6) uv: vec2<f32>,
     @location(7) preview: f32,
     @location(8) rgb: f32,
+    @location(9) gpu_color: vec4f,
 };
 
 struct Surface {
@@ -253,6 +254,7 @@ struct Surface {
     @location(6) uv: vec2<f32>,
     @location(7) @interpolate(flat) preview: f32,
     @location(8) @interpolate(flat) rgb: f32,
+    @location(9) @interpolate(flat) gpu_color: vec4f,
 };
 
 @vertex
@@ -280,7 +282,7 @@ fn project(v: Vertex) -> Surface {
             uv.x = 0.5 + asin(clamp((2.0*uv.x - 1.0)*panel.arc.x, -1.0, 1.0))*panel.arc.y;
         }
     }
-    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.material, v.highlight, v.glow, uv, v.preview, v.rgb);
+    return Surface(scene.clip_from_world * vec4<f32>(world, 1.0), world, v.normal, v.material, v.highlight, v.glow, uv, v.preview, v.rgb, v.gpu_color);
 }
 
 fn lin(c: vec3<f32>) -> vec3<f32> {
@@ -410,6 +412,9 @@ fn shade(s: Surface) -> @location(0) vec4<f32> {
             return out(diffuse,1.0);
         }
         return out(lamp * (0.84 + 0.40*s.glow), 1.0);
+    }
+    if mode == 30.0 {
+        return out(select(base, lin(s.gpu_color.rgb), s.gpu_color.a > 0.5) * (0.84 + 0.40*s.glow), 1.0);
     }
     if mode == 16.0 {
         return out(base * (0.84 + 0.40*s.glow), 1.0);

@@ -354,7 +354,7 @@ impl Desk {
             });
             w.rgb.discard_stale(route.as_ref());
             let snap = w.rgb.data.clone();
-            let painted = w.room.paint(&pictures, index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.fan_index())), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, self.weather, |g, ui, size| {
+            let painted = w.room.paint(&pictures, index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.part())), index.zip(w.rgb.gpu_color()), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, self.weather, |g, ui, size| {
                 if !w.rgb.open || cred.is_none() { login.paint_chip(g, ui, size.0, cred.as_ref()); }
                 #[cfg(windows)]
                 if let Some((version, rect)) = update.as_mut().filter(|_|!w.rgb.open) {
@@ -429,6 +429,13 @@ impl Desk {
                 w.room.stop_navigation();
                 return;
             }
+            if matches!(event, WindowEvent::MouseInput { button: MouseButton::Left, state: ElementState::Released, .. } | WindowEvent::CursorLeft { .. }) {
+                w.rgb.end_slide();
+            }
+            if matches!(event, WindowEvent::CursorMoved { .. }) && w.rgb.slide(w.cursor) {
+                w.window.request_redraw();
+                return;
+            }
             let rgb_index = w.room.rgb_index(&self.machines, self.rgb_config.as_deref(), w.rgb_machine.as_deref());
             let left = matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. });
             if left && !w.rgb.open && w.room.on_weather_source(w.cursor) {
@@ -437,7 +444,7 @@ impl Desk {
             }
             if left && !w.rgb.open && !w.rgb.clickable(w.cursor) && !w.room.pointer_on_page(self.machines.len()) {
                 if let Some(crate::scene::Pick::Case(index)) = w.room.pick(w.cursor) {
-                    let fan = w.room.fan_hit(index, w.cursor).unwrap_or(0);
+                    let fan = w.room.light_hit(index, w.cursor).unwrap_or(crate::rgb::LightPart::Fan(0));
                     let route = crate::rgb::Target::for_machine(&self.machines[index], self.session.get().as_ref(), self.rgb_config.as_ref());
                     w.rgb.discard_stale(route.as_ref());
                     w.rgb_machine = Some(self.machines[index].label.clone());
@@ -452,7 +459,7 @@ impl Desk {
                     let was_open = w.rgb.open;
                     let touched = w.rgb.click(w.cursor);
                     if !touched {
-                        if let Some(fan) = w.room.fan_hit(index, w.cursor) {
+                        if let Some(fan) = w.room.light_hit(index, w.cursor) {
                             w.rgb.choose(fan);
                         } else if was_open {
                             w.rgb.close();
@@ -466,7 +473,7 @@ impl Desk {
                     }
                 }
                 if w.rgb.open || w.rgb.contains(w.cursor) {
-                    let clickable = w.rgb.clickable(w.cursor) || w.room.fan_hit(index, w.cursor).is_some();
+                    let clickable = w.rgb.clickable(w.cursor) || w.room.light_hit(index, w.cursor).is_some();
                     w.window.set_cursor(if clickable { CursorIcon::Pointer } else { CursorIcon::Default });
                     return;
                 }
@@ -600,7 +607,7 @@ impl Desk {
                 if code == KeyCode::KeyL && !event.repeat {
                     if let Some(i) = w.room.rgb_index(&self.machines, self.rgb_config.as_deref(), w.rgb_machine.as_deref()) {
                         w.rgb_machine = Some(self.machines[i].label.clone());
-                        w.rgb.choose(0);
+                        w.rgb.choose(crate::rgb::LightPart::Fan(0));
                         w.room.rgb_view(Some(i));
                         w.window.request_redraw();
                         return;
@@ -937,7 +944,9 @@ impl ApplicationHandler<Ev> for Desk {
             }
             let active = has_pc && !self.login.open && (self.focused == Some(id) || self.test.drives_picker());
             let rgb_proxy = self.proxy.clone();
-            let route = index.filter(|_|active).and_then(|i| crate::rgb::Target::for_machine(&self.machines[i],self.session.get().as_ref(),self.rgb_config.as_ref()));
+            let route = index.filter(|_| !self.login.open).and_then(|i| {
+                crate::rgb::Target::for_machine(&self.machines[i], self.session.get().as_ref(), self.rgb_config.as_ref())
+            });
             if w.rgb.sync(active, &self.net.handle, route, move |gen, msg| {
                 let _ = rgb_proxy.send_event(Ev::Rgb(id, gen, msg));
             }) {

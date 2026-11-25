@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use kasa_gridview::GridRenderer;
 use winit::keyboard::KeyCode;
 
-use super::{hex, parse_color, Color, Target, Fan, Session, Snapshot, Update, NAMES};
+use super::{hex, parse_color, Color, Target, Fan, LightPart, Session, Snapshot, Update, NAMES};
 use crate::text::Ui;
 
 type Rect = (f32, f32, f32, f32);
@@ -23,6 +23,37 @@ const PALETTE: [Color; 8] = [
 fn rgba(c: Color) -> [u8; 4] {
     [c[0], c[1], c[2], 255]
 }
+fn hue(t: f32) -> Color {
+    let h = t.rem_euclid(1.0) * 6.0;
+    let up = (h.fract() * 255.0).round() as u8;
+    let down = 255 - up;
+    match h as u8 {
+        0 => [255, up, 0],
+        1 => [down, 255, 0],
+        2 => [0, 255, up],
+        3 => [0, down, 255],
+        4 => [up, 0, 255],
+        _ => [255, 0, down],
+    }
+}
+
+fn hue_position(c: Color) -> f32 {
+    let [r, g, b] = c.map(f32::from);
+    let peak = r.max(g).max(b);
+    let span = peak - r.min(g).min(b);
+    if span == 0.0 {
+        return 0.0;
+    }
+    let sector = if peak == r {
+        (g - b) / span
+    } else if peak == g {
+        2.0 + (b - r) / span
+    } else {
+        4.0 + (r - g) / span
+    };
+    sector.rem_euclid(6.0) / 6.0
+}
+
 fn inside((x, y, w, h): Rect, (px, py): (f32, f32)) -> bool {
     px >= x && px < x + w && py >= y && py < y + h
 }
@@ -37,14 +68,24 @@ fn center(g: &mut GridRenderer, ui: &mut Ui, r: Rect, t: &str, sz: f32, col: [u8
     ui.draw(g, r.0 + (r.2 - w) * 0.5, r.1 + (r.3 - sz) * 0.5, t, sz, col, bold);
 }
 
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Tab {
+    #[default]
+    Fans,
+    Graphics,
+    Cooling,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Action {
     Open,
     Close,
-    Light,
-    Cooling,
+    Tab(Tab),
+    Revert,
     Fan(usize),
     Swatch(usize),
+    Hue,
+    Brightness,
     Hex,
     Apply,
     Release,
@@ -58,10 +99,10 @@ pub struct Panel {
     retry: Option<Instant>,
     target: Option<Target>,
     error: Option<String>,
-    cooling: bool,
+    tab: Tab,
     fan: usize,
     pending: bool,
-    submitted: Option<(usize, String)>,
+    submitted: Option<(LightPart, String)>,
     draft: String,
     edited: bool,
     typing: bool,
@@ -70,6 +111,8 @@ pub struct Panel {
     body: Option<Rect>,
     focus: Option<Action>,
     upload: bool,
+    drag: Option<(Rect, Action)>,
+    bright_color: Option<Color>,
 }
 impl Panel {
     fn set_target(&mut self, target: Option<Target>) -> bool {
@@ -88,6 +131,8 @@ impl Panel {
         self.typing = false;
         self.draft.clear();
         self.hits.clear();
+        self.drag = None;
+        self.bright_color = None;
         true
     }
 
@@ -104,7 +149,18 @@ impl Panel {
         target: Option<Target>,
         notify: impl Fn(u64, Update) + Send + Sync + 'static,
     ) -> bool {
-        let changed = self.set_target(target.filter(|_| active));
+        let changed = self.set_target(target);
+        // Keep the draft while another window has focus, so a HEX value can be copied from it.
+        if !active {
+            let suspended = self.session.take().is_some() || self.data.is_some();
+            self.generation = 0;
+            self.data = None;
+            self.retry = None;
+            self.pending = false;
+            self.submitted = None;
+            self.drag = None;
+            return changed || suspended;
+        }
         if self.target.is_none() { return changed; }
         if self.session.is_none() && self.retry.is_none_or(|t| t <= Instant::now()) {
             let Some(target) = self.target.clone() else { return false };
@@ -117,9 +173,32 @@ impl Panel {
         }
         changed
     }
-    pub fn fan_index(&self) -> usize {
-        self.fan
+    pub fn part(&self) -> LightPart {
+        if self.tab == Tab::Graphics {
+            LightPart::Gpu
+        } else {
+            LightPart::Fan(self.fan)
+        }
     }
+
+    pub fn gpu_color(&self) -> Option<Color> {
+        if self.open && self.tab == Tab::Graphics && self.edited {
+            if let Some(c) = parse_color(&self.draft) {
+                return Some(c);
+            }
+        }
+        let data = self.data.as_ref()?;
+        let light = data.gpu_light.as_ref()?;
+        if !data.connected || !light.controller || !light.sync {
+            return None;
+        }
+        if light.asleep {
+            Some([0; 3])
+        } else {
+            light.fixed.or(light.sample)
+        }
+    }
+
     pub fn paste_hex(&mut self, text: &str) {
         if !self.typing {
             return;
@@ -128,6 +207,7 @@ impl Panel {
         if parse_color(value).is_some() {
             self.draft = value.to_ascii_uppercase();
             self.replace_hex = false;
+            self.bright_color = None;
             self.edited = true;
         }
     }
@@ -145,7 +225,7 @@ impl Panel {
             Ok(data) => {
                 self.error = None;
                 if update.applied {
-                    if self.submitted.take().is_some_and(|(fan, draft)| fan == self.fan && draft == self.draft) {
+                    if self.submitted.take().is_some_and(|(fan, draft)| fan == self.part() && draft == self.draft) {
                         self.edited = false;
                     }
                     self.pending = false;
@@ -169,13 +249,20 @@ impl Panel {
         self.data.as_ref().map_or_else(Fan::default, |s| s.fans[self.fan])
     }
     fn load_color(&mut self) {
-        let f = self.current();
-        self.draft = hex(f.fixed.or(f.inner).unwrap_or(PALETTE[6]));
+        let color = match self.part() {
+            LightPart::Gpu => self.data.as_ref().and_then(|s| s.gpu_light.as_ref().and_then(|g| g.fixed.or(g.sample))),
+            LightPart::Fan(_) => self.current().fixed.or(self.current().inner),
+        };
+        self.draft = hex(color.unwrap_or(PALETTE[6]));
+        self.bright_color = None;
     }
-    pub fn choose(&mut self, fan: usize) {
+    pub fn choose(&mut self, part: LightPart) {
         self.open = true;
-        self.cooling = false;
-        self.fan = fan;
+        self.drag = None;
+        self.tab = match part {
+            LightPart::Fan(i) => { self.fan = i; Tab::Fans }
+            LightPart::Gpu => Tab::Graphics,
+        };
         self.edited = false;
         self.typing = false;
         self.focus = None;
@@ -183,6 +270,7 @@ impl Panel {
     }
     pub fn close(&mut self) {
         self.open = false;
+        self.drag = None;
         self.focus = None;
         self.typing = false;
         self.hits.clear();
@@ -195,23 +283,33 @@ impl Panel {
         self.hits.iter().any(|(r, _)| inside(*r, p))
     }
     fn ready(&self) -> bool {
-        self.data.as_ref().is_some_and(|s| s.connected && s.fans[self.fan].mapped) && !self.pending
+        self.data.as_ref().is_some_and(|s| s.connected && match self.part() {
+            LightPart::Fan(i) => s.fans[i].mapped,
+            LightPart::Gpu => s.gpu_light.as_ref().is_some_and(|g| g.controller),
+        }) && !self.pending
     }
     fn activate(&mut self, act: Action) {
         if act != Action::Hex {
             self.typing = false;
         }
         match act {
-            Action::Open => self.choose(self.fan),
+            Action::Open => self.choose(self.part()),
             Action::Close => self.close(),
-            Action::Light => self.cooling = false,
-            Action::Cooling => self.cooling = true,
-            Action::Fan(i) => self.choose(i),
+            Action::Tab(tab) => {
+                if self.tab != tab {
+                    self.tab = tab;
+                    self.edited = false;
+                    self.load_color();
+                }
+            }
+            Action::Revert => { self.edited = false; self.load_color(); }
+            Action::Fan(i) => self.choose(LightPart::Fan(i)),
             Action::Hex => {
                 self.typing = true;
                 self.replace_hex = true;
             }
             Action::Swatch(i) => {
+                self.bright_color = None;
                 self.draft = hex(PALETTE[i]);
                 self.edited = true;
             }
@@ -222,23 +320,68 @@ impl Panel {
                 } else {
                     None
                 };
-                self.pending = self.session.as_ref().is_some_and(|s| s.color(self.fan, c));
+                self.pending = self.session.as_ref().is_some_and(|s| s.color(self.part(), c));
                 if self.pending {
-                    self.submitted = Some((self.fan, self.draft.clone()));
+                    self.submitted = Some((self.part(), self.draft.clone()));
                 }
             }
             _ => {}
         }
     }
+    fn adjust(&mut self, action: Action, value: f32) {
+        let t = value.clamp(0.0, 1.0);
+        let color = match action {
+            Action::Hue => hue(t),
+            Action::Brightness => {
+                let c = self
+                    .bright_color
+                    .unwrap_or_else(|| parse_color(&self.draft).unwrap_or([255; 3]));
+                let max = *c.iter().max().unwrap();
+                let base = if max == 0 { [255; 3] } else { c };
+                self.bright_color = Some(base);
+                let peak = f32::from(*base.iter().max().unwrap());
+                base.map(|v| (f32::from(v) * 255.0 * t / peak).round() as u8)
+            }
+            _ => return,
+        };
+        if action == Action::Hue {
+            self.bright_color = None;
+        }
+        self.draft = hex(color);
+        self.edited = true;
+        self.typing = false;
+    }
+
+    pub fn slide(&mut self, p: (f32, f32)) -> bool {
+        let Some((rect, action)) = self.drag else { return false };
+        self.adjust(action, (p.0 - rect.0) / rect.2);
+        true
+    }
+
+    pub fn end_slide(&mut self) {
+        self.drag = None;
+    }
+
     pub fn click(&mut self, p: (f32, f32)) -> bool {
-        if let Some(a) = self.hits.iter().find(|(r, _)| inside(*r, p)).map(|(_, a)| *a) {
-            self.focus = None;
-            self.activate(a);
+        self.drag = None;
+        if let Some(&(r, a)) = self.hits.iter().find(|(r, _)| inside(*r, p)) {
+            if matches!(a, Action::Hue | Action::Brightness) {
+                self.focus = Some(a);
+                self.drag = Some((r, a));
+                if a == Action::Brightness && parse_color(&self.draft).is_some_and(|v| v != [0; 3]) {
+                    self.bright_color = parse_color(&self.draft);
+                }
+                self.slide(p);
+            } else {
+                self.focus = None;
+                self.activate(a);
+            }
             true
         } else {
             self.body.is_some_and(|r| inside(r, p))
         }
     }
+
     pub fn key(&mut self, code: KeyCode, text: Option<&str>, shift: bool) {
         if code == KeyCode::Escape {
             if self.typing {
@@ -279,6 +422,7 @@ impl Panel {
                     self.replace_hex = false
                 }
                 if self.draft.len() + t.len() <= 6 {
+                    self.bright_color = None;
                     self.draft.push_str(&t.to_ascii_uppercase());
                     self.edited = true;
                 }
@@ -287,8 +431,16 @@ impl Panel {
             if let Some(a) = self.focus {
                 self.activate(a);
             }
-        } else if !self.cooling && matches!(code, KeyCode::ArrowLeft | KeyCode::ArrowRight) {
-            self.choose((self.fan + if code == KeyCode::ArrowRight { 1 } else { 5 }) % 6);
+        } else if let Some(action @ (Action::Hue | Action::Brightness)) = self.focus {
+            if matches!(code, KeyCode::ArrowLeft | KeyCode::ArrowRight) {
+                let c = parse_color(&self.draft).unwrap_or(PALETTE[6]);
+                let delta = if code == KeyCode::ArrowRight { 0.025 } else { -0.025 };
+                let pos = if action == Action::Hue { (hue_position(c) + delta).rem_euclid(1.0) }
+                    else { f32::from(*c.iter().max().unwrap())/255.0 + delta };
+                self.adjust(action, pos);
+            }
+        } else if self.tab == Tab::Fans && matches!(code, KeyCode::ArrowLeft | KeyCode::ArrowRight) {
+            self.choose(LightPart::Fan((self.fan + if code == KeyCode::ArrowRight { 1 } else { 5 }) % 6));
         }
     }
     fn hit(&mut self, g: &mut GridRenderer, r: Rect, a: Action) {
@@ -345,15 +497,11 @@ impl Panel {
         let close = (x + w - pad - 25.0, y + if compact { 6.0 } else { 16.0 }, 26.0, 26.0);
         center(g, ui, close, "×", 19.0, MUTED, false);
         self.hit(g, close, Action::Close);
-        if let Some(hint) = connection_hint {
-            ui.draw(g,l,y+88.0,"RGB 연결",17.0,TEXT,true);
-            ui.draw(g,l,y+126.0,hint,12.0,MUTED,false);
-            return;
-        }
         let status = match (&self.data, &self.error) {
             (Some(s), _) if s.connected => "연결됨",
             (Some(_), _) => "허브 대기",
             (None, Some(_)) => "연결 끊김",
+            _ if connection_hint.is_some() => "미연결",
             _ => "연결 중",
         };
         let stat_col = if self.data.as_ref().is_some_and(|s| s.connected) { RAIN } else { AMBER };
@@ -362,22 +510,122 @@ impl Panel {
         let tab_y = y + if compact { 36.0 } else { 65.0 };
         let tab_h = if compact { 25.0 } else { 33.0 };
         fill(g, (l, tab_y, iw, tab_h), 6.0, [13, 30, 52, 255]);
-        for (i, (label, a)) in [("팬 조명", Action::Light), ("냉각 · LCD", Action::Cooling)].into_iter().enumerate() {
-            let tab = (l + 2.0 + i as f32 * iw / 2.0, tab_y + 2.0, iw / 2.0 - 4.0, tab_h - 4.0);
-            if self.cooling == (i == 1) {
+        for (i, (label, page)) in [("팬 조명", Tab::Fans), ("그래픽카드", Tab::Graphics), ("냉각 · LCD", Tab::Cooling)].into_iter().enumerate() {
+            let tab = (l + 2.0 + i as f32 * iw / 3.0, tab_y + 2.0, iw / 3.0 - 4.0, tab_h - 4.0);
+            if self.tab == page {
                 fill(g, tab, 5.0, SURFACE);
                 g.rect(tab.0 + 10.0, tab.1 + tab.3 - 2.0, tab.2 - 20.0, 2.0, RAIN);
             }
-            center(g, ui, tab, label, 12.5, if self.cooling == (i == 1) { TEXT } else { MUTED }, true);
-            self.hit(g, tab, a);
+            center(g, ui, tab, label, 12.5, if self.tab == page { TEXT } else { MUTED }, true);
+            self.hit(g, tab, Action::Tab(page));
         }
         let top = tab_y + tab_h + if compact { 8.0 } else { 20.0 };
-        if self.cooling {
-            self.thermal(g, ui, (l, top, iw, h - (top - y) - pad), compact);
-        } else {
-            self.lights(g, ui, (l, top, iw, h - (top - y) - pad), compact);
+        let area = (l, top, iw, h - (top - y) - pad);
+        match self.tab {
+            Tab::Graphics => self.graphics(g, ui, area, compact, connection_hint),
+            _ if connection_hint.is_some() => {
+                ui.draw(g, l, top + 12.0, connection_hint.unwrap_or_default(), 12.0, MUTED, false);
+            }
+            Tab::Cooling => self.thermal(g, ui, area, compact),
+            Tab::Fans => self.lights(g, ui, area, compact),
         }
     }
+
+    fn graphics(&mut self, g: &mut GridRenderer, ui: &mut Ui, (x, y, w, h): Rect, compact: bool, hint: Option<&str>) {
+        let data = self.data.as_deref();
+        let light = data.and_then(|s| s.gpu_light.as_ref());
+        let fixed = light.and_then(|s| s.fixed);
+        let stats = [
+            data.and_then(|s| s.gpu).map(|n| format!("{n:.0}°C")),
+            light.and_then(|s| s.utilization).map(|n| format!("{n}%")),
+        ];
+        let stats = stats.into_iter().flatten().collect::<Vec<_>>().join("  ·  ");
+        ui.draw(g, x, y, "NEPTUNE", if compact { 17.0 } else { 23.0 }, TEXT, true);
+        let sw = ui.measure(g, &stats, 12.0, false);
+        ui.draw(g, x + w - sw, y + 3.0, &stats, 12.0, RAIN, false);
+        let info_y = y + if compact { 23.0 } else { 34.0 };
+        ui.draw(g, x, info_y, "iGame GeForce RTX 4070 Ti", 12.0, MUTED, false);
+        let mode = match (light, fixed) {
+            (_, Some(c)) => format!("고정 색   #{}", hex(c)),
+            (Some(v), None) => {
+                let effect = if v.effect.is_empty() {
+                    "효과 따르기"
+                } else {
+                    &v.effect
+                };
+                v.sample.map_or_else(
+                    || effect.to_string(),
+                    |c| format!("{effect}   ·   효과 대표색 #{}", hex(c)),
+                )
+            }
+            _ => "설정 확인 대기".to_owned(),
+        };
+        let card_y = info_y + if compact { 18.0 } else { 27.0 };
+        fill(g, (x, card_y, w, if compact { 27.0 } else { 40.0 }), 6.0, SURFACE);
+        let yy = card_y + if compact { 7.0 } else { 13.0 };
+        if let Some(c) = fixed.or_else(|| light.and_then(|v| v.sample)) {
+            fill(g, (x + 9.0, yy, 14.0, 14.0), 4.0, rgba(c));
+        } else {
+            outline(g, (x + 9.0, yy, 14.0, 14.0), 4.0, EDGE);
+        }
+        ui.draw(g, x + 32.0, yy, &mode, 12.0, TEXT, true);
+        let status = match light {
+            _ if hint.is_some() => hint.unwrap_or_default(),
+            None if data.is_some() => "이 연결은 GPU 조명을 지원하지 않아요",
+            None => "GPU 조명 상태를 기다리고 있어요",
+            Some(_) if !data.is_some_and(|s| s.connected) => "RGB Control 연결 끊김",
+            Some(v) if !v.controller => "Razer 조명 컨트롤러 미연결",
+            Some(v) if !v.sync => "RGB Control의 장치 동기화 꺼짐",
+            Some(v) if v.asleep => "모니터 꺼짐 · 조명 소등 중",
+            Some(_) => "Razer ARGB  ·  채널 5",
+        };
+        let status_y = card_y + if compact { 30.0 } else { 50.0 };
+        ui.draw(g, x, status_y, status, 11.5, MUTED, false);
+        let bar_y = status_y + if compact { 16.0 } else { 26.0 };
+        let bar_h = if compact { 16.0 } else { 21.0 };
+        let draft = parse_color(&self.draft).unwrap_or(PALETTE[6]);
+        for (i, (label, action)) in [("색상", Action::Hue), ("밝기", Action::Brightness)]
+            .into_iter()
+            .enumerate()
+        {
+            let left = x + i as f32 * (w / 2.0 + 3.0);
+            ui.draw(g, left, bar_y + 2.0, label, 11.0, MUTED, false);
+            let bar = (left + 29.0, bar_y, w / 2.0 - 38.0, bar_h);
+            let base = if draft == [0; 3] {
+                self.bright_color.unwrap_or([255; 3])
+            } else {
+                draft
+            };
+            let peak = f32::from(*base.iter().max().unwrap()).max(1.0);
+            for j in 0..32 {
+                let t = j as f32 / 31.0;
+                let c = if i == 0 {
+                    hue(t)
+                } else {
+                    base.map(|v| (f32::from(v) * t * 255.0 / peak).round() as u8)
+                };
+                g.rect(
+                    bar.0 + j as f32 * bar.2 / 32.0,
+                    bar.1,
+                    bar.2 / 32.0 + 0.3,
+                    bar.3,
+                    rgba(c),
+                );
+            }
+            let t = if i == 0 {
+                hue_position(draft)
+            } else {
+                f32::from(*draft.iter().max().unwrap()) / 255.0
+            };
+            let px = bar.0 + t * (bar.2 - 3.0);
+            g.rect(px, bar.1 - 1.0, 3.0, bar.3 + 2.0, INK);
+            g.rect(px + 1.0, bar.1 - 1.0, 1.0, bar.3 + 2.0, TEXT);
+            self.hit(g, bar, action);
+        }
+        let py = bar_y + bar_h + if compact { 6.0 } else { 10.0 };
+        self.editor(g, ui, (x, py, w, y + h - py), compact);
+    }
+
     fn lights(&mut self, g: &mut GridRenderer, ui: &mut Ui, (x, y, w, h): Rect, compact: bool) {
         let gap = 5.0;
         let tw = (w - 2.0 * gap) / 3.0;
@@ -414,6 +662,9 @@ impl Panel {
         let mw = ui.measure(g, &meta, 11.0, false);
         ui.draw(g, x + w - mw, ty + 2.0, &meta, 11.0, MUTED, false);
         let py = ty + if compact { 22.0 } else { 34.0 };
+        self.editor(g, ui, (x, py, w, y + h - py), compact);
+    }
+    fn editor(&mut self, g: &mut GridRenderer, ui: &mut Ui, (x,py,w,h): Rect, compact: bool) {
         let sw = (w - 7.0 * 5.0) / 8.0;
         for (i, c) in PALETTE.into_iter().enumerate() {
             let r = (x + i as f32 * (sw + 5.0), py, sw, if compact { 19.0 } else { 28.0 });
@@ -435,18 +686,23 @@ impl Panel {
         let apply = (x + w * 0.50 + 4.0, cy, w * 0.50 - 4.0, ch);
         let ready = self.ready() && parse_color(&self.draft).is_some();
         fill(g, apply, 6.0, if ready { RAIN } else { SURFACE });
-        center(g, ui, apply, if self.pending { "적용 중" } else { "색 적용" }, 13.0, if ready { INK } else { MUTED }, true);
+        center(g, ui, apply, if self.pending { "적용 중" } else if self.tab == Tab::Graphics && !self.ready() { "미리보기 전용" } else if self.tab == Tab::Graphics { "GPU 색 저장" } else { "색 적용" }, 13.0, if ready { INK } else { MUTED }, true);
         if ready {
             self.hit(g, apply, Action::Apply);
         }
-        let reset = (x, cy + ch + 3.0, w, (y + h - cy - ch - 3.0).clamp(19.0, 32.0));
+        let reset = (x, cy + ch + 3.0, w, (py + h - cy - ch - 3.0).clamp(19.0, 32.0));
         if let Some(err) = &self.error {
             center(g, ui, reset, err, 11.0, AMBER, false);
         } else {
-            center(g, ui, reset, "효과 따르기", 12.0, MUTED, false);
-            if self.ready() {
-                self.hit(g, reset, Action::Release);
-            }
+            let preview = self.tab == Tab::Graphics && self.edited;
+            let reset = if preview {
+                let revert = (x, reset.1, w*0.5, reset.3);
+                center(g, ui, revert, "미리보기 취소", 12.0, RAIN, false);
+                self.hit(g, revert, Action::Revert);
+                (x + w*0.5, reset.1, w*0.5, reset.3)
+            } else { reset };
+            center(g, ui, reset, "효과 따르기", 12.0, if self.ready() { TEXT } else { MUTED }, false);
+            if self.ready() { self.hit(g, reset, Action::Release); }
         }
     }
     fn thermal(&mut self, g: &mut GridRenderer, ui: &mut Ui, (x, y, w, h): Rect, compact: bool) {
@@ -490,5 +746,35 @@ impl Panel {
         if let Some(e) = &self.error {
             ui.draw(g, x, y + h - 13.0, e, 11.0, AMBER, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn gpu_preview_edits_do_not_overwrite_the_host_snapshot() {
+        let raw = json!({"connected":true,"fans": super::super::SPOTS.map(|s| json!({"spot":s})),
+            "gpu_light":{"controller":true,"sync":true,"asleep":true,"fixed":"993300","sample":"ccddee","effect":"ice"}});
+        let mut panel = Panel { data: Some(Arc::new(Snapshot::parse(&raw).unwrap())), ..Default::default() };
+        panel.choose(LightPart::Gpu);
+        assert_eq!(panel.gpu_color(), Some([0;3]));
+        panel.adjust(Action::Hue, 1.0/3.0);
+        panel.adjust(Action::Brightness, 0.0);
+        panel.adjust(Action::Brightness, 0.5);
+        assert_eq!(panel.gpu_color(), Some([0,128,0]));
+        panel.activate(Action::Revert);
+        assert_eq!(panel.gpu_color(), Some([0;3]));
+        assert_eq!(panel.draft, "993300");
+        let mut old = raw;
+        old.as_object_mut().unwrap().remove("gpu_light");
+        panel.data = Some(Arc::new(Snapshot::parse(&old).unwrap()));
+        assert!(!panel.ready());
+        panel.activate(Action::Swatch(2));
+        assert_eq!(panel.gpu_color(), Some(PALETTE[2]));
+        panel.close();
+        assert_eq!(panel.gpu_color(), None);
     }
 }
