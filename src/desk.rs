@@ -1,6 +1,9 @@
 //! 창들 — 창 하나에 기기 하나를 본다. 기기를 아직 안 골랐으면 고르기 화면이다. 보기·조작·HUD 는 본 앱 화면 탭과 같은
 //! `kasa_castview` 다. 창마다 렌더러 하나, 연결은 그 창이 열려 있는 동안만 쥔다.
 
+mod bottom_edge;
+use bottom_edge::BottomEdge;
+
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
@@ -69,6 +72,7 @@ struct Win {
     display: Option<u32>,
     closed_since: Option<Instant>,
     cursor: (f32, f32),
+    bottom_edge: BottomEdge,
     occluded: bool,
     room: Room,
     rgb: crate::rgb::Panel,
@@ -287,7 +291,7 @@ impl Desk {
         };
         let mut win = Win {
             gpu, window, label, view: None, display: None, closed_since: None,
-            cursor: (0.0, 0.0), occluded: false,
+            cursor: (0.0, 0.0), bottom_edge: BottomEdge::default(), occluded: false,
             room: Room::default(), rgb:Default::default(), rgb_machine:None, preview: Default::default(), preview_pending: Default::default(), ui: Ui::new(),
         };
         if win.label.is_none() {
@@ -317,6 +321,7 @@ impl Desk {
                 }
                 None => None,
             };
+            w.bottom_edge.clear();
             w.view = None;
             w.gpu.drop_image(TEXTURE);
             let proxy = self.proxy.clone();
@@ -399,6 +404,7 @@ impl Desk {
     }
 
     fn back_to_picker(w: &mut Win, machines: &[Machine]) {
+        w.bottom_edge.clear();
         w.view = None;
         let label = w.label.take();
         w.display = None;
@@ -548,6 +554,7 @@ impl Desk {
                         Click::Ignored => false,
                         Click::Handled | Click::Pressed => true,
                         Click::Display(next) => {
+                            w.bottom_edge.clear();
                             w.display = Some(next);
                             w.view = None;
                             true
@@ -677,11 +684,27 @@ impl Desk {
     }
 
     fn pointer_event(&mut self, id: WindowId, event: &WindowEvent) {
-        if let WindowEvent::CursorMoved { position, .. } = event {
-            if let Some(w) = self.windows.get_mut(&id) {
-                let scale = w.gpu.scale.max(0.5);
-                w.cursor = (position.x as f32 / scale, position.y as f32 / scale);
+        let Some(w) = self.windows.get_mut(&id) else { return };
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = f64::from(w.gpu.scale.max(0.5));
+                let p = (position.x / scale, position.y / scale);
+                w.cursor = (p.0 as f32, p.1 as f32);
+                if let Some(view) = w.view.as_mut() {
+                    let active = self.focused == Some(id) && !w.occluded && view.control
+                        && view.key_menu.is_none() && !view.closed() && view.input_note().is_none();
+                    if let Some(hit) = w.bottom_edge.motion(view.layout.filter(|_| active), p, scale) {
+                        // Clicks and scrolling still go through the normal in-image hit test.
+                        if !hit.crossed || w.window.set_cursor_position(PhysicalPosition::new(position.x, hit.local_row)).is_ok() {
+                            w.cursor.1 = hit.image_row;
+                        }
+                        view.pointer((p.0, hit.remote_y), view.buttons, view.remote_mods(key_mods(self.modifiers)));
+                        return;
+                    }
+                }
             }
+            WindowEvent::CursorLeft { .. } => w.bottom_edge.clear(),
+            _ => {}
         }
         self.mouse(id, event);
     }
@@ -852,6 +875,7 @@ impl ApplicationHandler<Ev> for Desk {
             WindowEvent::RedrawRequested => self.paint(id),
             WindowEvent::Resized(size) => {
                 if let Some(w) = self.windows.get_mut(&id) {
+                    w.bottom_edge.clear();
                     w.gpu.resize(size.width, size.height);
                     if w.label.is_none() {
                         w.room.reflow(w.logical(), &self.machines);
@@ -871,6 +895,7 @@ impl ApplicationHandler<Ev> for Desk {
                     }
                     w.gpu.set_font_size(FONT_SIZE);
                     let size = w.window.inner_size();
+                    w.bottom_edge.clear();
                     w.gpu.resize(size.width, size.height);
                     if w.label.is_none() {
                         w.room.reflow(w.logical(), &self.machines);
@@ -881,6 +906,7 @@ impl ApplicationHandler<Ev> for Desk {
             }
             WindowEvent::Occluded(hidden) => {
                 if let Some(w) = self.windows.get_mut(&id) {
+                    w.bottom_edge.clear();
                     w.occluded = *hidden;
                     if !hidden { w.window.request_redraw(); }
                 }
@@ -893,6 +919,7 @@ impl ApplicationHandler<Ev> for Desk {
                     self.focused = Some(id);
                 } else if self.focused == Some(id) {
                     if let Some(w) = self.windows.get_mut(&id) {
+                        w.bottom_edge.clear();
                         w.room.stop_navigation();
                         if let Some(view) = w.view.as_mut() {
                             view.focus_lost();
