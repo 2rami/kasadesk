@@ -147,6 +147,22 @@ pub async fn providers(client: &reqwest::Client, origin: &str) -> Vec<String> {
         .collect()
 }
 
+#[derive(Default)]
+pub struct Profile {
+    pub display: Option<String>,
+    pub login: Option<String>,
+    pub device: Option<String>,
+}
+
+pub async fn profile(c: &Credential) -> Option<Profile> {
+    let v: Value = client().get(format!("{}/relay/whoami", c.origin)).bearer_auth(&c.token)
+        .send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
+    if v["account"].as_str() != Some(c.account.as_str()) { return None; }
+    let field = |key: &str| v[key].as_str().map(str::trim)
+        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control)).map(str::to_owned);
+    Some(Profile { display: field("display_name"), login: field("login"), device: field("label") })
+}
+
 pub async fn password_login(client: &reqwest::Client, origin: &str, account: &str, password: &str, machine: &str) -> Result<Credential, String> {
     let body = json!({ "account": account, "password": password, "kind": "phone", "machine_id": machine, "label": label() });
     let res = client.post(format!("{origin}/relay/login")).json(&body).send().await.map_err(|e| format!("관문에 못 닿아요: {e}"))?;

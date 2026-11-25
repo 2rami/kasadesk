@@ -47,6 +47,7 @@ pub enum Ev {
     Choose(account::Ticket),
     /// 관문이 켠 로그인 방법.
     Providers(Vec<String>),
+    Profile(Credential, account::Profile),
     /// 관문이 자격을 거절했다(폐기·다른 곳에서 로그아웃) — 명부 일꾼이 이미 지웠다.
     Revoked,
     /// 맥 Caps Lock — winit 이 키로 안 넘겨 AppKit 감시가 보낸다.
@@ -85,7 +86,7 @@ impl Win {
     }
 
     fn room_cursor(&self, count: usize) {
-        self.window.set_cursor(if self.room.on_weather_source(self.cursor) || self.room.pointer_on_device() || self.room.pointer_on_page(count) {
+        self.window.set_cursor(if self.room.on_help(self.cursor) || self.room.on_weather_source(self.cursor) || self.room.pointer_on_device() || self.room.pointer_on_page(count) {
             CursorIcon::Pointer
         } else {
             CursorIcon::Default
@@ -137,7 +138,7 @@ impl Desk {
     pub fn new(proxy: EventLoopProxy<Ev>, net: Arc<Net>, open: Option<String>, session: Arc<Session>, state: std::path::PathBuf) -> Self {
         let test = crate::rig::Rig::from_env();
         let mut login = Login::default();
-        login.open = test.login_panel;
+        if test.login_panel { login.open_login(); }
         crate::weather::start(&net.handle, proxy.clone());
         let desk = Self {
             proxy: Arc::new(proxy),
@@ -162,7 +163,7 @@ impl Desk {
             #[cfg(windows)]
             quit_for_update: false,
         };
-        if desk.login.open {
+        if desk.login.is_open() {
             desk.fetch_providers();
         }
         desk
@@ -188,6 +189,16 @@ impl Desk {
             Action::None => return,
             Action::Redraw => {}
             Action::Opened => self.fetch_providers(),
+            Action::ProfileOpened => {
+                if let Some(cred) = self.session.get() {
+                    let proxy = self.proxy.clone();
+                    self.net.handle.spawn(async move {
+                        if let Some(info) = account::profile(&cred).await {
+                            let _ = proxy.send_event(Ev::Profile(cred, info));
+                        }
+                    });
+                }
+            }
             Action::Logout => {
                 if let Some(cred) = self.session.get() {
                     self.net.handle.spawn(async move { account::logout(&account::client(), &cred).await });
@@ -354,14 +365,16 @@ impl Desk {
             });
             w.rgb.discard_stale(route.as_ref());
             let snap = w.rgb.data.clone();
+            let account_devices = self.machines.iter().filter(|m| m.account.is_some()).count();
             let painted = w.room.paint(&pictures, index.zip(snap.as_deref()), index.zip(w.rgb.open.then_some(w.rgb.part())), index.zip(w.rgb.gpu_color()), &mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, self.weather, |g, ui, size| {
-                if !w.rgb.open || cred.is_none() { login.paint_chip(g, ui, size.0, cred.as_ref()); }
                 #[cfg(windows)]
-                if let Some((version, rect)) = update.as_mut().filter(|_|!w.rgb.open) {
+                if let Some((version, rect)) = update.as_mut().filter(|_| !w.rgb.open && !login.is_open()) {
                     *rect = Some(paint_update(g, ui, size.0, version));
                 }
-                w.rgb.paint(g, ui, size, index.is_some() && !login.open, hint);
-                login.paint_panel(g, ui, size);
+                w.rgb.paint(g, ui, size, index.is_some() && !login.signing_in(), hint);
+                let show_account = !w.rgb.open || size.0 >= 550.0 || login.is_open();
+                login.paint_chip(g, ui, size.0, cred.as_ref(), show_account);
+                login.paint_panel(g, ui, size, cred.as_ref(), account_devices);
             });
             if painted.is_ok() { self.test.presented_previews(&pictures); }
             painted
@@ -411,22 +424,27 @@ impl Desk {
             }
             if let WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } = event {
                 #[cfg(windows)]
-                if !self.login.open && !w.rgb.open && self.update.as_ref().and_then(|u| u.1).is_some_and(|(x, y, w, h)| {
+                if !self.login.is_open() && !w.rgb.open && self.update.as_ref().and_then(|u| u.1).is_some_and(|(x, y, w, h)| {
                     p.0 >= f64::from(x) && p.0 < f64::from(x + w) && p.1 >= f64::from(y) && p.1 < f64::from(y + h)
                 }) {
                     self.quit_for_update = crate::update::install_now(true);
                     return;
                 }
                 let logged_in = self.session.get().is_some();
-                let action = if w.rgb.open && logged_in { Action::None } else { self.login.click(p, logged_in) };
-                if !matches!(action, Action::None) || self.login.open {
+                let action = self.login.click(p, logged_in);
+                if !matches!(action, Action::None) || self.login.is_open() {
                     w.room.stop_navigation();
                     self.login_action(action);
                     return;
                 }
             }
-            if self.login.open {
+            if matches!(event, WindowEvent::CursorMoved { .. }) && self.login.clickable(p) {
+                w.window.set_cursor(CursorIcon::Pointer);
+                return;
+            }
+            if self.login.is_open() {
                 w.room.stop_navigation();
+                w.window.set_cursor(CursorIcon::Default);
                 return;
             }
             if matches!(event, WindowEvent::MouseInput { button: MouseButton::Left, state: ElementState::Released, .. } | WindowEvent::CursorLeft { .. }) {
@@ -438,6 +456,10 @@ impl Desk {
             }
             let rgb_index = w.room.rgb_index(&self.machines, self.rgb_config.as_deref(), w.rgb_machine.as_deref());
             let left = matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. });
+            if left && !w.rgb.open && w.room.click_help(w.cursor) {
+                w.window.request_redraw();
+                return;
+            }
             if left && !w.rgb.open && w.room.on_weather_source(w.cursor) {
                 account::open_browser("https://open-meteo.com/");
                 return;
@@ -577,7 +599,7 @@ impl Desk {
                 if !pressed {
                     if let Some(code) = code { w.room.travel_key(code, false); }
                 }
-                if self.login.open { w.room.stop_navigation(); }
+                if self.login.is_open() { w.room.stop_navigation(); }
                 if let Some(action) = self.login.key(event) {
                     self.login_action(action);
                     return;
@@ -635,7 +657,10 @@ impl Desk {
 
     fn picker_key(&mut self, id: WindowId, code: KeyCode, repeat: bool) {
         let Some(w) = self.windows.get_mut(&id).filter(|w| w.label.is_none()) else { return };
-        if code == KeyCode::KeyR && !repeat {
+        if (code == KeyCode::F1 || (code == KeyCode::Escape && w.room.help_open())) && !repeat {
+            w.room.toggle_help();
+            w.window.request_redraw();
+        } else if code == KeyCode::KeyR && !repeat {
             w.room.toggle_rain();
             w.window.request_redraw();
         } else if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
@@ -770,7 +795,16 @@ impl ApplicationHandler<Ev> for Desk {
                 self.login.providers = list;
                 self.redraw_pickers();
             }
-            Ev::Revoked => self.redraw_pickers(),
+            Ev::Profile(owner, info) => {
+                if self.session.get().as_ref() == Some(&owner) {
+                    self.login.set_profile(info);
+                    self.redraw_pickers();
+                }
+            }
+            Ev::Revoked => {
+                self.login.close();
+                self.redraw_pickers();
+            }
             #[cfg(windows)]
             Ev::UpdateReady(version) => {
                 self.update = Some((version, None));
@@ -935,16 +969,16 @@ impl ApplicationHandler<Ev> for Desk {
             if !w.rgb.open { w.rgb_machine = None; }
             let index = w.room.rgb_index(&self.machines, self.rgb_config.as_deref(), w.rgb_machine.as_deref());
             let has_pc = index.is_some();
-            if !has_pc || self.login.open {
+            if !has_pc || self.login.signing_in() {
                 if w.rgb.open {
                     w.rgb.close();
                     w.room.rgb_view(None);
                     w.window.request_redraw();
                 }
             }
-            let active = has_pc && !self.login.open && (self.focused == Some(id) || self.test.drives_picker());
+            let active = has_pc && !self.login.signing_in() && (self.focused == Some(id) || self.test.drives_picker());
             let rgb_proxy = self.proxy.clone();
-            let route = index.filter(|_| !self.login.open).and_then(|i| {
+            let route = index.filter(|_| !self.login.signing_in()).and_then(|i| {
                 crate::rgb::Target::for_machine(&self.machines[i], self.session.get().as_ref(), self.rgb_config.as_ref())
             });
             if w.rgb.sync(active, &self.net.handle, route, move |gen, msg| {
@@ -954,7 +988,7 @@ impl ApplicationHandler<Ev> for Desk {
             }
             if let Some(at)=w.rgb.retry_at(){schedule(&mut next,at);}
             let hidden = (w.occluded || w.window.is_minimized() == Some(true)) && !self.test.captures_previews();
-            let visible = if hidden || self.login.open { &[] } else { w.room.preview_targets() };
+            let visible = if hidden || self.login.signing_in() { &[] } else { w.room.preview_targets() };
             let proxy = self.proxy.clone();
             let pending = w.preview_pending.clone();
             let (changed, retry_at) = w.preview.sync(visible, &self.machines, &self.live, &self.net, move || {
@@ -962,7 +996,7 @@ impl ApplicationHandler<Ev> for Desk {
             });
             if changed { w.window.request_redraw(); }
             if let Some(at) = retry_at { schedule(&mut next, at); }
-            let weather = !w.occluded && !w.rgb.open && !self.login.open && (self.focused == Some(id) || self.test.drives_picker());
+            let weather = !w.occluded && !w.rgb.open && !self.login.is_open() && (self.focused == Some(id) || self.test.drives_picker());
             if let Some(at) = w.room.next_frame(weather, !visible.is_empty() && w.preview_pending.load(Ordering::Acquire)) {
                 if at <= now {
                     w.window.request_redraw();

@@ -6,7 +6,6 @@ mod mesh;
 mod panel;
 mod lod;
 
-use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Vec2, Vec3, vec2, vec3};
@@ -14,12 +13,11 @@ use kasa_gridview::GridRenderer;
 use winit::keyboard::KeyCode;
 
 use crate::roster::{DeviceKind, Machine};
-use crate::text::Ui;
+use crate::text::{fit, Ui};
 use mesh::{Model, Plan};
 
-const PAD: f32 = 24.0;
 const BOTTOM: f32 = 52.0;
-use crate::theme::{CLOUD as TEXT, INK as TAG, MIST as MUTE, RAIN as LIVE, SUN as WARM};
+use crate::theme::{CLOUD as TEXT, INK as TAG, MIST as MUTE, RAIN as LIVE};
 const IDLE: [u8; 4] = [159, 174, 191, 255];
 /// 다가가며 덮는 색 — 보기 화면 바탕(`desk::BG`)과 같다.
 const FADE: [u8; 3] = [24, 24, 27];
@@ -406,10 +404,29 @@ pub struct Room {
     arrived: Option<usize>,
     tags: Vec<(Rect, Pick)>,
     weather_link: Option<Rect>,
+    help_button: Option<Rect>,
+    show_help: bool,
     preview_targets: Vec<(usize, f32)>,
 }
 
 impl Room {
+    pub fn on_help(&self, p: Point) -> bool {
+        self.dive.is_none() && self.help_button.is_some_and(|r| contains(r,p))
+    }
+
+    pub fn help_open(&self) -> bool { self.show_help }
+
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+        self.stop_navigation();
+    }
+
+    pub fn click_help(&mut self, p: Point) -> bool {
+        if self.on_help(p) { self.toggle_help(); return true; }
+        if self.show_help { self.show_help = false; return true; }
+        false
+    }
+
     pub fn on_weather_source(&self, p: Point) -> bool {
         self.dive.is_none() && self.weather_link.is_some_and(|r| contains(r, p))
     }
@@ -505,7 +522,7 @@ impl Room {
         if self.dive.is_some() {
             return None;
         }
-        if self.on_weather_source(p) { return None; }
+        if self.on_weather_source(p) || self.on_help(p) { return None; }
         if let Some(&(_, index)) = self.tags.iter().find(|(r, _)| contains(*r, p)) {
             return Some(index);
         }
@@ -657,6 +674,7 @@ impl Room {
     }
 
     pub fn rgb_view(&mut self, index: Option<usize>) {
+        self.show_help = false;
         self.stop_navigation();
         self.tags.clear();
         if let Some(index) = index {
@@ -807,6 +825,7 @@ impl Room {
         }
         self.painted_at = Some(now);
         let paging = self.paging(machines.len());
+        let pointer_pick = self.pointer.and_then(|p| self.pick(p));
         let Some(layout) = &mut self.layout else { return g.render(0.0, true, |_, _, _, _, _, _| {}) };
         for device in &mut layout.devices {
             device.preview_visible = previews.iter().any(|(i,_)| *i == device.index);
@@ -840,7 +859,9 @@ impl Room {
             let mut placed: Vec<(Rect, Pick, Vec2, bool, Tag)> = Vec::new();
             for &(pick, at, name) in &anchors {
                 let index = pick.index();
-                let focus = self.selected == Some(index);
+                let focus = self.selected == Some(index) && if self.keyboard.is_some() {
+                    matches!(pick, Pick::Screen(_))
+                } else { pointer_pick == Some(pick) };
                 let (product, path, connected) = match pick {
                     Pick::Screen(_) => {
                         let product = catalog::library().description(&machines[index]).or_else(||
@@ -886,22 +907,21 @@ impl Room {
                 }
             }
         }
-        let heading = if editing.is_some() { "조명 · 냉각" } else { "여우비 작업실" };
-        let caption = weather.caption();
-        let caption_w = ui.measure(g, &caption, 10.0, true);
-        let source_w = if weather.has_source() { ui.measure(g, "Open-Meteo", 10.0, true) + 8.0 } else { 0.0 };
-        let title_w = ui.measure(g, heading, 18.0, true).max(caption_w + source_w) + 71.0;
-        g.round_rect_fill(PAD, 16.0, title_w, 52.0, 9.0, fade(TAG, calm));
-        crate::theme::weather_icon(g, PAD + 12.0, 25.0, calm, weather.conditions().sky, frame.indoor > 0.85);
-        g.rect(PAD + 52.0, 25.0, 1.0, 34.0, fade(crate::theme::EDGE, calm));
-        ui.draw(g, PAD + 62.0, 22.0, &caption, 10.0, fade(LIVE, calm), true);
-        self.weather_link = weather.has_source().then(|| {
-            let x = PAD + 62.0 + caption_w + 8.0;
-            let width = ui.draw(g, x, 22.0, "Open-Meteo", 10.0, fade(MUTE, calm), true);
-            g.rect(x, 33.0, width, 0.8, fade(MUTE, calm));
-            (x - 3.0, 17.0, width + 6.0, 19.0)
-        });
-        ui.draw(g, PAD + 61.0, 37.0, heading, 18.0, fade(TEXT, calm), true);
+        self.weather_link = None;
+        if editing.is_none() {
+            let caption = weather.caption();
+            let caption_w = ui.measure(g, &caption, 13.0, true);
+            let source_w = ui.measure(g, "Open-Meteo", 10.0, false);
+            let w = 53.0 + if weather.has_source() { caption_w.max(source_w) } else { caption_w };
+            let h = if weather.has_source() { 45.0 } else { 36.0 };
+            g.round_rect_fill(16.0, 16.0, w, h, 14.0, fade(TAG, calm));
+            crate::theme::weather_icon(g, 25.0, 16.0 + (h-28.0)*0.5, calm, weather.conditions().sky, frame.indoor > 0.85);
+            ui.draw(g, 57.0, if weather.has_source() { 23.0 } else { 27.0 }, &caption, 13.0, fade(TEXT,calm), true);
+            if weather.has_source() {
+                ui.draw(g, 57.0, 41.0, "Open-Meteo", 10.0, fade(MUTE,calm), false);
+                self.weather_link = Some((54.0, 38.0, source_w+7.0, 19.0));
+            }
+        }
         if machines.is_empty() {
             let text = if app_alive { "카사텀 명부에 기기를 추가하세요" } else { "카사텀을 띄우거나 로그인하면 기기가 보여요" };
             let desk = home.project(vec3((layout.plan.desk.0 + layout.plan.desk.1) / 2.0, mesh::DESK_Y + 3.0, 0.0));
@@ -919,31 +939,32 @@ impl Room {
             let pw = ui.measure(g, &pages, 12.0, false);
             ui.draw(g, width * 0.5 - pw / 2.0, left.1 + 7.0, &pages, 12.0, MUTE, false);
         }
-        let travel = [("WASD", "이동"), ("휠", "앞뒤"), ("우클릭", "시선"), ("Home", "복귀"),
-            ("R", if self.rain_paused { "날씨 재생" } else { "날씨 멈춤" })];
-        let fan_controls = [("클릭", "팬 선택"), ("Tab", "이동"), ("Esc", "닫기")];
-        let controls = if editing.is_some() { fan_controls.as_slice() } else { travel.as_slice() };
-        let mut control_x = width - PAD;
-        let bg = fade(TAG, calm);
-        if !machines.is_empty() && width >= 680.0 {
-            for &(key, action) in controls.iter().rev() {
-                let key_w = ui.measure(g, key, 11.0, true) + 12.0;
-                let action_w = ui.measure(g, action, 11.5, false);
-                let w = key_w + action_w + 17.0;
-                control_x -= w;
-                g.round_rect_fill(control_x,height-39.0,w,25.0,6.0,bg);
-                g.round_rect_fill(control_x+3.0,height-36.0,key_w,19.0,4.0,fade(crate::theme::SURFACE,calm));
-                ui.draw(g,control_x+9.0,height-33.0,key,11.0,fade(LIVE,calm),true);
-                ui.draw(g,control_x+key_w+9.0,height-33.0,action,11.5,fade(TEXT,calm),false);
-                control_x -= 3.0;
+        self.help_button = None;
+        if editing.is_none() {
+            let y = height - 50.0;
+            let x = width - 89.0;
+            self.help_button = Some((x, y, 73.0, 34.0));
+            g.round_rect_fill(x,y,73.0,34.0,12.0,fade(TAG,calm));
+            ui.draw(g,x+17.0,y+10.0,"조작법",13.0,fade(TEXT,calm),true);
+            if self.show_help {
+                let left = width - 208.0;
+                let top = y - 166.0;
+                g.round_rect_fill(left,top,192.0,158.0,12.0,TAG);
+                let controls = [("이동","W A S D"),("앞뒤로 이동","스크롤"),("시점 회전","우클릭 드래그"),
+                    ("시점 복귀","Home"),(if self.rain_paused { "날씨 재생" } else { "날씨 멈춤" },"R")];
+                for (i,(action,key)) in controls.iter().enumerate() {
+                    let line = top+14.0+i as f32*29.0;
+                    ui.draw(g,left+14.0,line,action,12.5,TEXT,false);
+                    let kw=ui.measure(g,key,12.0,true);
+                    ui.draw(g,left+178.0-kw,line,key,12.0,LIVE,true);
+                }
             }
+            let foot = fit(g,ui,foot,12.0,false,width-224.0);
+            let fw=ui.measure(g,&foot,12.0,false)+30.0;
+            g.round_rect_fill(16.0,y,fw,34.0,12.0,fade(TAG,calm));
+            g.round_rect_fill(27.0,y+14.0,6.0,6.0,3.0,fade(if app_alive { LIVE } else { IDLE },calm));
+            ui.draw(g,39.0,y+11.0,&foot,12.0,fade(TEXT,calm),false);
         }
-        let foot = editing.map_or(foot, |(i, _)| machines[i].label.as_str());
-        let foot = fit(g, ui, foot, 12.0, false, control_x - PAD - 34.0);
-        let foot_w = ui.measure(g, &foot, 12.0, false) + 28.0;
-        g.round_rect_fill(PAD,height-39.0,foot_w,25.0,6.0,bg);
-        g.round_rect_fill(PAD+9.0,height-29.0,5.0,5.0,2.5,fade(if app_alive { LIVE } else { WARM },calm));
-        ui.draw(g,PAD+20.0,height-33.0,&foot,12.0,fade(TEXT,calm),false);
         overlay(g, ui, (width, height));
         if let Some((_, _, progress)) = dive {
             let a = smooth(0.62, 1.0, progress);
@@ -1007,20 +1028,14 @@ impl Tag<'_> {
         let bg = fade(TAG, alpha);
         let size = Self::text_size(focus);
         let (name, path) = self.lines(g, ui, focus);
-        if focus {
-            g.round_rect_fill(x - 1.5, y - 1.5, w + 3.0, h + 3.0, 7.0, fade(WARM, alpha));
-        }
-        g.round_rect_fill(x, y, w, h, 6.0, bg);
-        if !focus { g.round_rect_stroke(x,y,w,h,6.0,1.0,fade(crate::theme::EDGE, alpha)); }
-        if focus {
-            g.round_rect_fill(x + 3.0, y + 8.0, 2.0, h - 16.0, 1.0, fade(WARM, alpha));
-        }
+        g.round_rect_fill(x, y+1.5, w, h, 10.0, fade([20,30,28,65],alpha));
+        g.round_rect_fill(x, y, w, h, 10.0, if focus { fade(crate::theme::PAPER,alpha) } else { bg });
         let line = if focus { 7.0 } else { 5.5 };
-        let dot = fade(if self.live { LIVE } else { IDLE }, alpha);
+        let dot = fade(if self.live && focus { crate::theme::TEAL } else if self.live { LIVE } else { IDLE }, alpha);
         g.round_rect_fill(x + 12.0, y + line + size * 0.6 - Self::DOT / 2.0, Self::DOT, Self::DOT, Self::DOT / 2.0, dot);
-        ui.draw(g, x + 12.0 + Self::DOT + 6.0, y + line, &name, size, fade(TEXT, alpha), focus);
+        ui.draw(g, x + 12.0 + Self::DOT + 6.0, y + line, &name, size, fade(if focus { crate::theme::CHARCOAL } else { TEXT }, alpha), focus);
         if let Some(path) = path {
-            ui.draw(g, x + 12.0, y + 26.0, &path, 11.5, fade(MUTE, alpha), false);
+            ui.draw(g, x + 12.0, y + 26.0, &path, 11.5, fade(crate::theme::SECONDARY, alpha), false);
         }
     }
 }
@@ -1050,23 +1065,10 @@ fn contains((x, y, w, h): Rect, (px, py): Point) -> bool {
     px >= x && px < x + w && py >= y && py < y + h
 }
 
-fn fit<'a>(g: &mut GridRenderer, ui: &mut Ui, text: &'a str, size: f32, bold: bool, max: f32) -> Cow<'a, str> {
-    if ui.measure(g, text, size, bold) <= max {
-        return text.into();
-    }
-    let available = max - ui.measure(g, "…", size, bold);
-    if available <= 0.0 {
-        return "".into();
-    }
-    let offsets: Vec<usize> = text.char_indices().map(|(i, _)| i).skip(1).collect();
-    let n = offsets.partition_point(|&i| ui.measure(g, &text[..i], size, bold) <= available);
-    let end = if n == 0 { 0 } else { offsets[n - 1] };
-    format!("{}…", &text[..end]).into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    const PAD: f32 = 24.0;
 
     fn machines(kinds: &[DeviceKind]) -> Vec<Machine> {
         kinds.iter().enumerate().map(|(i, &kind)| Machine {

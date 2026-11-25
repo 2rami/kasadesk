@@ -456,16 +456,15 @@ impl Panel {
             return;
         }
         if !self.open {
-            let r = (24.0, 78.0, 112.0, 32.0);
-            fill(g, r, 8.0, INK);
-            outline(g, r, 8.0, EDGE);
+            let r = (size.0 - 194.0, size.1 - 50.0, 100.0, 34.0);
+            fill(g, r, 12.0, INK);
             fill(
                 g,
                 (r.0 + 10.0, r.1 + 12.0, 8.0, 8.0),
                 4.0,
                 if self.data.as_ref().is_some_and(|s| s.connected) { RAIN } else { MUTED },
             );
-            ui.draw(g, r.0 + 25.0, r.1 + 9.0, "조명 · LCD", 13.0, TEXT, true);
+            ui.draw(g, r.0 + 25.0, r.1 + 10.0, "조명 · LCD", 13.0, TEXT, true);
             self.hit(g, r, Action::Open);
             return;
         }
@@ -482,18 +481,7 @@ impl Panel {
         let pad = if compact { 13.0 } else { 20.0 };
         let l = x + pad;
         let iw = w - 2.0 * pad;
-        g.round_rect_fill(l, y + 1.0, iw, 2.0, 1.0, EDGE);
-        g.rect(l, y + 1.0, iw * 0.22, 2.0, AMBER);
-        ui.draw(g, l, y + if compact { 9.0 } else { 18.0 }, "Y60", if compact { 22.0 } else { 29.0 }, TEXT, true);
-        ui.draw(
-            g,
-            l + if compact { 51.0 } else { 66.0 },
-            y + if compact { 15.0 } else { 29.0 },
-            "RGB Control",
-            13.0,
-            MUTED,
-            false,
-        );
+        ui.draw(g, l, y + if compact { 10.0 } else { 20.0 }, "본체 조명", if compact { 18.0 } else { 23.0 }, TEXT, true);
         let close = (x + w - pad - 25.0, y + if compact { 6.0 } else { 16.0 }, 26.0, 26.0);
         center(g, ui, close, "×", 19.0, MUTED, false);
         self.hit(g, close, Action::Close);
@@ -509,12 +497,11 @@ impl Panel {
         ui.draw(g, close.0 - 53.0, close.1 + 6.0, status, 10.5, stat_col, true);
         let tab_y = y + if compact { 36.0 } else { 65.0 };
         let tab_h = if compact { 25.0 } else { 33.0 };
-        fill(g, (l, tab_y, iw, tab_h), 6.0, [13, 30, 52, 255]);
+        fill(g, (l, tab_y, iw, tab_h), 6.0, [25, 31, 32, 255]);
         for (i, (label, page)) in [("팬 조명", Tab::Fans), ("그래픽카드", Tab::Graphics), ("냉각 · LCD", Tab::Cooling)].into_iter().enumerate() {
             let tab = (l + 2.0 + i as f32 * iw / 3.0, tab_y + 2.0, iw / 3.0 - 4.0, tab_h - 4.0);
             if self.tab == page {
                 fill(g, tab, 5.0, SURFACE);
-                g.rect(tab.0 + 10.0, tab.1 + tab.3 - 2.0, tab.2 - 20.0, 2.0, RAIN);
             }
             center(g, ui, tab, label, 12.5, if self.tab == page { TEXT } else { MUTED }, true);
             self.hit(g, tab, Action::Tab(page));
@@ -633,7 +620,7 @@ impl Panel {
         for i in 0..6 {
             let r = (x + (i % 3) as f32 * (tw + gap), y + (i / 3) as f32 * (th + gap), tw, th);
             let selected = i == self.fan;
-            fill(g, r, 6.0, if selected { [43, 66, 66, 255] } else { SURFACE });
+            fill(g, r, 6.0, if selected { [41, 74, 64, 255] } else { SURFACE });
             if selected {
                 outline(g, r, 6.0, RAIN)
             }

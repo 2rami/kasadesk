@@ -1,12 +1,17 @@
 use kasa_gridview::GridRenderer;
 
-pub const INK: [u8; 4] = [20, 40, 67, 250];
-pub const SURFACE: [u8; 4] = [44, 70, 104, 255];
-pub const EDGE: [u8; 4] = [91, 123, 158, 255];
-pub const CLOUD: [u8; 4] = [248, 246, 235, 255];
-pub const MIST: [u8; 4] = [188, 212, 229, 255];
-pub const RAIN: [u8; 4] = [138, 212, 234, 255];
-pub const SUN: [u8; 4] = [255, 194, 123, 255];
+pub const INK: [u8; 4] = [34, 41, 44, 248];
+pub const SURFACE: [u8; 4] = [56, 65, 68, 255];
+pub const EDGE: [u8; 4] = [103, 116, 116, 255];
+pub const CLOUD: [u8; 4] = [249, 248, 242, 255];
+pub const MIST: [u8; 4] = [191, 201, 198, 255];
+pub const RAIN: [u8; 4] = [163, 222, 202, 255];
+pub const SUN: [u8; 4] = [245, 193, 134, 255];
+pub const PAPER: [u8; 4] = [248, 247, 241, 255];
+pub const CHARCOAL: [u8; 4] = [36, 46, 46, 255];
+pub const SECONDARY: [u8; 4] = [77, 94, 92, 255];
+pub const RULE: [u8; 4] = [205, 212, 203, 255];
+pub const TEAL: [u8; 4] = [32, 97, 80, 255];
 
 pub fn weather_icon(g: &mut GridRenderer, x: f32, y: f32, alpha: f32, sky: crate::weather::Sky, night: bool) {
     use crate::weather::Sky;

@@ -118,3 +118,17 @@ impl kasa_castview::Canvas for Pen<'_> {
         self.ui.draw(self.g, x, y, text, size, color, false);
     }
 }
+
+pub fn fit<'a>(g: &mut GridRenderer, ui: &mut Ui, text: &'a str, size: f32, bold: bool, max: f32) -> std::borrow::Cow<'a, str> {
+    if ui.measure(g, text, size, bold) <= max {
+        return text.into();
+    }
+    let available = max - ui.measure(g, "…", size, bold);
+    if available <= 0.0 {
+        return "".into();
+    }
+    let offsets: Vec<usize> = text.char_indices().map(|(i, _)| i).skip(1).collect();
+    let n = offsets.partition_point(|&i| ui.measure(g, &text[..i], size, bold) <= available);
+    let end = if n == 0 { 0 } else { offsets[n - 1] };
+    format!("{}…", &text[..end]).into()
+}
